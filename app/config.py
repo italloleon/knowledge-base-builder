@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     API_KEY: str = ""
     LOG_LEVEL: str = "INFO"
 
+    OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
+    OLLAMA_MODEL: str = "gemma4:e4b"
+    OLLAMA_ENRICHMENT_ENABLED: bool = True
+    OLLAMA_ENRICHMENT_CONCURRENCY: int = 1
+    OLLAMA_TIMEOUT_SECONDS: int = 120
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

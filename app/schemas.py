@@ -80,6 +80,7 @@ class QuestionSummary(BaseModel):
     alternatives: dict
     gabarito: str | None
     confidence: float
+    enrichment: dict | None
     created_at: datetime
 
     model_config = {"from_attributes": True}

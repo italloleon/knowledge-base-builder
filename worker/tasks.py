@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from arq.connections import RedisSettings
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
@@ -118,7 +118,12 @@ async def process_exam(ctx: dict, job_id: str) -> None:  # noqa: ARG001
 
             total_found = len(parse_result.questions) + len(parse_result.errors)
 
-            # 5. Bulk insert questions
+            # 5. Wipe any previous attempt's rows for this job (makes retries idempotent)
+            await session.execute(delete(ParseError).where(ParseError.job_id == job.id))
+            await session.execute(delete(Question).where(Question.job_id == job.id))
+            await session.commit()
+
+            # 6. Bulk insert questions
             question_records: list[Question] = []
             for pq in parse_result.questions:
                 question_records.append(
@@ -153,7 +158,7 @@ async def process_exam(ctx: dict, job_id: str) -> None:  # noqa: ARG001
             session.add_all(question_records)
             session.add_all(error_records)
 
-            # 6. Update job counts
+            # 7. Update job counts and commit parsed questions
             job.total_found = total_found
             job.parsed_ok = len(question_records)
             job.parse_errors = len(error_records)
@@ -170,6 +175,36 @@ async def process_exam(ctx: dict, job_id: str) -> None:  # noqa: ARG001
                 len(question_records),
                 len(error_records),
             )
+
+            # Stage 4 — LLM enrichment (optional, non-blocking on failure)
+            if settings.OLLAMA_ENRICHMENT_ENABLED and question_records:
+                logger.info("Stage 4: enriching %d questions via Ollama", len(question_records))
+                try:
+                    from app.pipeline.enrichers.ollama import enrich_questions  # noqa: PLC0415
+
+                    # Build a number→record index for fast lookups
+                    q_by_number = {qr.number: qr for qr in question_records}
+                    enriched_count = 0
+
+                    async for q_number, enrichment in enrich_questions(parse_result.questions):
+                        if enrichment is not None:
+                            q_record = q_by_number.get(q_number)
+                            if q_record is not None:
+                                await session.execute(
+                                    update(Question)
+                                    .where(Question.id == q_record.id)
+                                    .values(enrichment=enrichment)
+                                )
+                                await session.commit()
+                                enriched_count += 1
+
+                    logger.info(
+                        "Stage 4 done: enriched %d/%d questions",
+                        enriched_count,
+                        len(question_records),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Stage 4 enrichment failed (non-fatal): %s", exc)
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("process_exam crashed: job_id=%s", job_id)
