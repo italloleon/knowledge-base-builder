@@ -27,6 +27,11 @@ class JobStatus(str, enum.Enum):
     partial = "partial"
 
 
+class DocumentCategory(str, enum.Enum):
+    prova = "prova"
+    edital = "edital"
+
+
 class SectionType(str, enum.Enum):
     conhecimentos_gerais = "conhecimentos_gerais"
     conhecimentos_especificos = "conhecimentos_especificos"
@@ -55,9 +60,9 @@ class Exam(Base):
 
     __table_args__ = (UniqueConstraint("file_hash", name="uq_exams_file_hash"),)
 
-    jobs: Mapped[list["Job"]] = relationship("Job", back_populates="exam")
-    questions: Mapped[list["Question"]] = relationship("Question", back_populates="exam")
-    parse_errors: Mapped[list["ParseError"]] = relationship("ParseError", back_populates="exam")
+    jobs: Mapped[list["Job"]] = relationship("Job", back_populates="exam", passive_deletes=True)
+    questions: Mapped[list["Question"]] = relationship("Question", back_populates="exam", passive_deletes=True)
+    parse_errors: Mapped[list["ParseError"]] = relationship("ParseError", back_populates="exam", passive_deletes=True)
 
 
 class Job(Base):
@@ -68,6 +73,11 @@ class Job(Base):
     )
     exam_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("exams.id", ondelete="SET NULL"), nullable=True
+    )
+    category: Mapped[DocumentCategory] = mapped_column(
+        Enum(DocumentCategory, name="document_category_enum"),
+        nullable=False,
+        default=DocumentCategory.prova,
     )
     status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus, name="job_status_enum"), nullable=False, default=JobStatus.pending

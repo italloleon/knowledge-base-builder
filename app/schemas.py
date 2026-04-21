@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, HttpUrl, field_validator
 
-from app.models import JobStatus, QuestionType, SectionType
+from app.models import DocumentCategory, JobStatus, QuestionType, SectionType
 
 
 # --------------------------------------------------------------------------- #
@@ -13,6 +13,7 @@ from app.models import JobStatus, QuestionType, SectionType
 
 class IngestURLRequest(BaseModel):
     url: str
+    category: DocumentCategory
 
     @field_validator("url")
     @classmethod
@@ -35,6 +36,7 @@ class IngestResponse(BaseModel):
 class JobResponse(BaseModel):
     id: uuid.UUID
     exam_id: uuid.UUID | None
+    category: DocumentCategory
     status: JobStatus
     total_found: int
     parsed_ok: int

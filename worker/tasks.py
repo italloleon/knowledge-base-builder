@@ -110,17 +110,11 @@ async def process_exam(ctx: dict, job_id: str) -> None:  # noqa: ARG001
                 )
                 return
 
-            # Stage 2 — preprocessing
-            logger.info("Stage 2: preprocessing markdown (%d chars)", len(markdown))
-            from app.pipeline.preprocessing import preprocess  # noqa: PLC0415
+            # Stages 2 & 3 — preprocessing + parsing
+            logger.info("Stage 2/3: parsing markdown (%d chars) category=%s", len(markdown), job.category)
+            from app.pipeline.parsers import get_parser  # noqa: PLC0415
 
-            preprocess_result = preprocess(markdown)
-
-            # Stage 3 — parsing
-            logger.info("Stage 3: parsing questions")
-            from app.pipeline.parsing import parse_questions  # noqa: PLC0415
-
-            parse_result = parse_questions(preprocess_result)
+            parse_result = get_parser(job.category).run(markdown)
 
             total_found = len(parse_result.questions) + len(parse_result.errors)
 

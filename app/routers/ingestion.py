@@ -8,13 +8,13 @@ import aiofiles
 import httpx
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.config import settings
 from app.database import get_session
-from app.models import Exam, Job, JobStatus
+from app.models import DocumentCategory, Exam, Job, JobStatus
 from app.schemas import IngestResponse, IngestURLRequest
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
@@ -50,10 +50,13 @@ async def _get_or_create_exam(
     return exam
 
 
-async def _create_job(session: AsyncSession, exam_id: uuid.UUID) -> Job:
+async def _create_job(
+    session: AsyncSession, exam_id: uuid.UUID, category: DocumentCategory
+) -> Job:
     job = Job(
         id=uuid.uuid4(),
         exam_id=exam_id,
+        category=category,
         status=JobStatus.pending,
     )
     session.add(job)
@@ -73,6 +76,7 @@ async def _save_upload(content: bytes, filename: str) -> Path:
 @router.post("/upload", response_model=IngestResponse, status_code=202)
 async def ingest_upload(
     file: UploadFile = File(...),
+    category: DocumentCategory = Form(...),
     session: AsyncSession = Depends(get_session),
 ):
     # Validate content type
@@ -104,7 +108,7 @@ async def ingest_upload(
 
     async with session.begin():
         exam = await _get_or_create_exam(session, file.filename or "upload.pdf", file_hash)
-        job = await _create_job(session, exam.id)
+        job = await _create_job(session, exam.id, category)
 
     await _save_upload(content, safe_filename)
     await _enqueue_job(str(job.id))
@@ -168,7 +172,7 @@ async def ingest_url(
 
     async with session.begin():
         exam = await _get_or_create_exam(session, original_filename, file_hash)
-        job = await _create_job(session, exam.id)
+        job = await _create_job(session, exam.id, body.category)
 
     await _save_upload(content, safe_filename)
     await _enqueue_job(str(job.id))
