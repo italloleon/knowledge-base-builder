@@ -13,6 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.config import settings
 from app.models import Exam, Job, JobStatus, ParseError, Question
 
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    force=True,
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -118,9 +125,9 @@ async def process_exam(ctx: dict, job_id: str) -> None:  # noqa: ARG001
 
             total_found = len(parse_result.questions) + len(parse_result.errors)
 
-            # 5. Wipe any previous attempt's rows for this job (makes retries idempotent)
-            await session.execute(delete(ParseError).where(ParseError.job_id == job.id))
-            await session.execute(delete(Question).where(Question.job_id == job.id))
+            # 5. Wipe ALL previous parse data for this exam (makes re-uploads clean)
+            await session.execute(delete(ParseError).where(ParseError.exam_id == exam.id))
+            await session.execute(delete(Question).where(Question.exam_id == exam.id))
             await session.commit()
 
             # 6. Bulk insert questions
@@ -176,36 +183,6 @@ async def process_exam(ctx: dict, job_id: str) -> None:  # noqa: ARG001
                 len(error_records),
             )
 
-            # Stage 4 — LLM enrichment (optional, non-blocking on failure)
-            if settings.OLLAMA_ENRICHMENT_ENABLED and question_records:
-                logger.info("Stage 4: enriching %d questions via Ollama", len(question_records))
-                try:
-                    from app.pipeline.enrichers.ollama import enrich_questions  # noqa: PLC0415
-
-                    # Build a number→record index for fast lookups
-                    q_by_number = {qr.number: qr for qr in question_records}
-                    enriched_count = 0
-
-                    async for q_number, enrichment in enrich_questions(parse_result.questions):
-                        if enrichment is not None:
-                            q_record = q_by_number.get(q_number)
-                            if q_record is not None:
-                                await session.execute(
-                                    update(Question)
-                                    .where(Question.id == q_record.id)
-                                    .values(enrichment=enrichment)
-                                )
-                                await session.commit()
-                                enriched_count += 1
-
-                    logger.info(
-                        "Stage 4 done: enriched %d/%d questions",
-                        enriched_count,
-                        len(question_records),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Stage 4 enrichment failed (non-fatal): %s", exc)
-
         except Exception as exc:  # noqa: BLE001
             logger.exception("process_exam crashed: job_id=%s", job_id)
             try:
@@ -215,12 +192,89 @@ async def process_exam(ctx: dict, job_id: str) -> None:  # noqa: ARG001
 
 
 # ---------------------------------------------------------------------------
+# Enrichment-only task
+# ---------------------------------------------------------------------------
+
+
+async def enrich_exam(  # noqa: ARG001
+    ctx: dict, exam_id: str, mode: str, provider: str | None = None
+) -> None:
+    """Enrich questions for an existing exam. mode='missing'|'all', provider='ollama'|'gemini'."""
+    resolved_provider = (provider or settings.ENRICHMENT_PROVIDER).lower()
+    logger.info(
+        "enrich_exam started: exam_id=%s mode=%s provider=%s", exam_id, mode, resolved_provider
+    )
+
+    from app.pipeline.base import ParsedQuestion  # noqa: PLC0415
+    from app.pipeline.enrichers import get_enricher  # noqa: PLC0415
+
+    enrich_questions = get_enricher(resolved_provider)
+
+    async with _AsyncSession() as session:
+        stmt = (
+            select(Question)
+            .where(Question.exam_id == uuid.UUID(exam_id))
+            .where(Question.alternatives != {})  # skip questions with no alternatives
+        )
+        if mode == "missing":
+            stmt = stmt.where(Question.enrichment.is_(None))
+        stmt = stmt.order_by(Question.number)
+
+        questions = (await session.execute(stmt)).scalars().all()
+
+        if not questions:
+            logger.info("enrich_exam: nothing to enrich for exam %s", exam_id)
+            return
+
+        logger.info("enrich_exam: enriching %d questions", len(questions))
+
+        parsed = [
+            ParsedQuestion(
+                number=q.number,
+                section=q.section.value if hasattr(q.section, "value") else str(q.section),
+                question_type=q.question_type.value if hasattr(q.question_type, "value") else str(q.question_type),
+                enunciado=q.enunciado,
+                items=q.items,
+                alternatives=q.alternatives or {},
+                gabarito=q.gabarito,
+                raw_block="",
+                confidence=q.confidence,
+            )
+            for q in questions
+        ]
+        q_by_number = {q.number: q for q in questions}
+        enriched_count = 0
+
+        try:
+            async for q_number, enrichment in enrich_questions(parsed):
+                if enrichment is not None:
+                    q_record = q_by_number.get(q_number)
+                    if q_record is not None:
+                        await session.execute(
+                            update(Question)
+                            .where(Question.id == q_record.id)
+                            .values(enrichment=enrichment)
+                        )
+                        await session.commit()
+                        enriched_count += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("enrich_exam failed (partial): %s", exc)
+
+        logger.info(
+            "enrich_exam done: exam_id=%s enriched=%d/%d",
+            exam_id,
+            enriched_count,
+            len(questions),
+        )
+
+
+# ---------------------------------------------------------------------------
 # ARQ WorkerSettings
 # ---------------------------------------------------------------------------
 
 
 class WorkerSettings:
-    functions = [process_exam]
+    functions = [process_exam, enrich_exam]
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     max_jobs = 10
     job_timeout = 3600  # 1 hour — PDF extraction can be slow

@@ -58,9 +58,20 @@ class ExamResponse(BaseModel):
     filename: str
     file_hash: str
     question_count: int
+    enriched_count: int
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class EnrichRequest(BaseModel):
+    mode: str = "missing"  # "missing" | "all"
+    provider: str | None = None  # None = use ENRICHMENT_PROVIDER from config; "ollama" | "gemini"
+
+
+class EnrichResponse(BaseModel):
+    message: str
+    queued: int
 
 
 # --------------------------------------------------------------------------- #

@@ -10,11 +10,21 @@ class Settings(BaseSettings):
     API_KEY: str = ""
     LOG_LEVEL: str = "INFO"
 
+    # Ollama (local LLM)
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
     OLLAMA_MODEL: str = "gemma4:e4b"
-    OLLAMA_ENRICHMENT_ENABLED: bool = True
     OLLAMA_ENRICHMENT_CONCURRENCY: int = 1
     OLLAMA_TIMEOUT_SECONDS: int = 120
+
+    # Gemini (Google cloud LLM)
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_ENRICHMENT_CONCURRENCY: int = 5
+    GEMINI_TIMEOUT_SECONDS: int = 30
+
+    # Default provider used when the enrich buttons don't specify one
+    # Accepted values: "ollama" | "gemini"
+    ENRICHMENT_PROVIDER: str = "ollama"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

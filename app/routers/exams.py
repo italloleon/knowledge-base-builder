@@ -4,6 +4,8 @@ import uuid
 from pathlib import Path
 from typing import Annotated
 
+from arq import create_pool
+from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import func, select
@@ -13,6 +15,8 @@ from app.config import settings
 from app.database import get_session
 from app.models import Exam, ParseError, Question, QuestionType, SectionType
 from app.schemas import (
+    EnrichRequest,
+    EnrichResponse,
     ExamResponse,
     PaginatedQuestions,
     ParseErrorResponse,
@@ -32,32 +36,83 @@ _EXAM_NOT_FOUND = "Exam not found"
 
 @router.get("/exams", response_model=list[ExamResponse])
 async def list_exams(session: AsyncSession = Depends(get_session)):
-    # Get exams with their question counts via subquery
     q_count_subq = (
         select(Question.exam_id, func.count(Question.id).label("question_count"))
         .group_by(Question.exam_id)
         .subquery()
     )
+    enriched_count_subq = (
+        select(Question.exam_id, func.count(Question.id).label("enriched_count"))
+        .where(Question.enrichment.isnot(None))
+        .group_by(Question.exam_id)
+        .subquery()
+    )
 
     stmt = (
-        select(Exam, func.coalesce(q_count_subq.c.question_count, 0).label("question_count"))
+        select(
+            Exam,
+            func.coalesce(q_count_subq.c.question_count, 0).label("question_count"),
+            func.coalesce(enriched_count_subq.c.enriched_count, 0).label("enriched_count"),
+        )
         .outerjoin(q_count_subq, Exam.id == q_count_subq.c.exam_id)
+        .outerjoin(enriched_count_subq, Exam.id == enriched_count_subq.c.exam_id)
         .order_by(Exam.created_at.desc())
     )
     rows = (await session.execute(stmt)).all()
 
     result = []
-    for exam, qcount in rows:
+    for exam, qcount, ecount in rows:
         result.append(
             ExamResponse(
                 id=exam.id,
                 filename=exam.filename,
                 file_hash=exam.file_hash,
                 question_count=qcount,
+                enriched_count=ecount,
                 created_at=exam.created_at,
             )
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Enrichment trigger
+# ---------------------------------------------------------------------------
+
+
+@router.post("/exams/{exam_id}/enrich", response_model=EnrichResponse, status_code=202)
+async def trigger_enrich(
+    exam_id: uuid.UUID,
+    body: EnrichRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    if body.mode not in ("missing", "all"):
+        raise HTTPException(status_code=422, detail="mode must be 'missing' or 'all'")
+
+    exam_result = await session.execute(select(Exam).where(Exam.id == exam_id))
+    if not exam_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail=_EXAM_NOT_FOUND)
+
+    q_stmt = (
+        select(func.count(Question.id))
+        .where(Question.exam_id == exam_id)
+        .where(Question.alternatives != {})  # skip questions with no alternatives
+    )
+    if body.mode == "missing":
+        q_stmt = q_stmt.where(Question.enrichment.is_(None))
+    count = (await session.execute(q_stmt)).scalar_one()
+
+    if count == 0:
+        return EnrichResponse(message="No questions to enrich", queued=0)
+
+    pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
+    await pool.enqueue_job("enrich_exam", str(exam_id), body.mode, body.provider)
+    await pool.aclose()
+
+    provider_label = (body.provider or settings.ENRICHMENT_PROVIDER).lower()
+    return EnrichResponse(
+        message=f"Enrichment queued ({body.mode}, {provider_label})", queued=count
+    )
 
 
 # ---------------------------------------------------------------------------

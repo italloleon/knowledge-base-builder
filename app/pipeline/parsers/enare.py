@@ -109,6 +109,10 @@ class ENAREParser(DocumentParser):
         stripped = line.strip()
         if not stripped:
             return False
+        # Never remove lines that are alternatives — they repeat across questions by design
+        for pattern in [_ALT_PAREN_BOTH, _ALT_PAREN_RIGHT, _ALT_DOT]:
+            if pattern.match(stripped):
+                return False
         if stripped in repeating:
             return True
         return any(p.match(stripped) for p in _NOISE_PATTERNS)
