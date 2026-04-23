@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,8 +7,10 @@ class Settings(BaseSettings):
     REDIS_URL: str
     UPLOAD_DIR: str = "/app/uploads"
     MAX_UPLOAD_SIZE_MB: int = 50
-    AUTH_ENABLED: bool = False
+    AUTH_ENABLED: bool = True
     API_KEY: str = ""
+    # Comma-separated list of allowed CORS origins, e.g. http://1.2.3.4:8080
+    ALLOWED_ORIGINS: str = ""
     LOG_LEVEL: str = "INFO"
 
     # Ollama (local LLM)
@@ -27,6 +30,15 @@ class Settings(BaseSettings):
     ENRICHMENT_PROVIDER: str = "ollama"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @model_validator(mode="after")
+    def check_api_key_when_auth_enabled(self) -> "Settings":
+        if self.AUTH_ENABLED and not self.API_KEY:
+            raise ValueError(
+                "API_KEY must be set when AUTH_ENABLED=true. "
+                "Generate one with: openssl rand -hex 32"
+            )
+        return self
 
 
 settings = Settings()

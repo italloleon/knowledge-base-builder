@@ -28,7 +28,9 @@ async def readiness():
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001
-        db_status = f"error: {exc}"
+        import logging
+        logging.getLogger(__name__).warning("Health DB check failed: %s", exc)
+        db_status = "error"
         overall = "degraded"
 
     # Check Redis
@@ -37,7 +39,9 @@ async def readiness():
         await client.ping()
         await client.aclose()
     except Exception as exc:  # noqa: BLE001
-        redis_status = f"error: {exc}"
+        import logging
+        logging.getLogger(__name__).warning("Health Redis check failed: %s", exc)
+        redis_status = "error"
         overall = "degraded"
 
     body = HealthReady(status=overall, database=db_status, redis=redis_status)

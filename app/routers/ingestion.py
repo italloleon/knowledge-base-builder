@@ -1,8 +1,11 @@
 """Ingestion endpoints — file upload and remote URL."""
 
 import hashlib
+import ipaddress
+import socket
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiofiles
 import httpx
@@ -20,6 +23,30 @@ from app.schemas import IngestResponse, IngestURLRequest
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
 _MAX_BYTES = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+
+def _assert_no_ssrf(url: str) -> None:
+    """Raise HTTPException if the URL resolves to a private/internal address."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise HTTPException(status_code=422, detail="Only HTTPS URLs are accepted")
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=422, detail="URL has no host")
+    try:
+        results = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        raise HTTPException(status_code=422, detail="Cannot resolve host")
+    for _, _, _, _, sockaddr in results:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+        ):
+            raise HTTPException(status_code=422, detail="URL resolves to a disallowed address")
 
 
 async def _enqueue_job(job_id: str) -> None:
@@ -122,6 +149,7 @@ async def ingest_url(
     session: AsyncSession = Depends(get_session),
 ):
     url = body.url
+    _assert_no_ssrf(url)
 
     try:
         async with httpx.AsyncClient(
@@ -131,7 +159,7 @@ async def ingest_url(
                 write=10.0,
                 pool=5.0,
             ),
-            follow_redirects=True,
+            follow_redirects=False,
         ) as client:
             response = await client.get(url)
             response.raise_for_status()
@@ -141,11 +169,8 @@ async def ingest_url(
             status_code=502,
             detail=f"Remote server returned HTTP {exc.response.status_code}",
         ) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to download PDF from URL: {exc}",
-        ) from exc
+    except httpx.RequestError:
+        raise HTTPException(status_code=502, detail="Failed to fetch the URL")
 
     if len(content) == 0:
         raise HTTPException(status_code=422, detail="Downloaded file is empty")

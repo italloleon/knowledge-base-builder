@@ -1,5 +1,8 @@
 """Exam and question query endpoints."""
 
+import csv
+import io
+import json
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -73,6 +76,124 @@ async def list_exams(session: AsyncSession = Depends(get_session)):
             )
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Bulk export (all exams)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/exams/export")
+async def export_exams(
+    format: Annotated[str, Query()] = "json",
+    session: AsyncSession = Depends(get_session),
+):
+    """Download all exams + questions as JSON or CSV."""
+    if format not in ("json", "csv"):
+        raise HTTPException(status_code=422, detail="format must be 'json' or 'csv'")
+
+    exams = (await session.execute(select(Exam).order_by(Exam.created_at))).scalars().all()
+
+    if format == "json":
+        result = []
+        for exam in exams:
+            qs = (
+                await session.execute(
+                    select(Question).where(Question.exam_id == exam.id).order_by(Question.number)
+                )
+            ).scalars().all()
+            result.append(
+                {
+                    "id": str(exam.id),
+                    "filename": exam.filename,
+                    "file_hash": exam.file_hash,
+                    "created_at": exam.created_at.isoformat(),
+                    "questions": [
+                        {
+                            "id": str(q.id),
+                            "number": q.number,
+                            "section": q.section.value,
+                            "question_type": q.question_type.value,
+                            "enunciado": q.enunciado,
+                            "items": q.items,
+                            "alternatives": q.alternatives,
+                            "gabarito": q.gabarito,
+                            "confidence": q.confidence,
+                            "enrichment": q.enrichment,
+                        }
+                        for q in qs
+                    ],
+                }
+            )
+        content = json.dumps(result, ensure_ascii=False, indent=2)
+        return Response(
+            content=content.encode("utf-8"),
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="exams_export.json"'},
+        )
+
+    else:  # csv
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(
+            [
+                "exam_filename",
+                "exam_id",
+                "question_number",
+                "section",
+                "question_type",
+                "enunciado",
+                "alternative_a",
+                "alternative_b",
+                "alternative_c",
+                "alternative_d",
+                "alternative_e",
+                "gabarito",
+                "confidence",
+                "area",
+                "topic",
+                "keywords",
+                "difficulty",
+                "bloom_level",
+            ]
+        )
+        for exam in exams:
+            qs = (
+                await session.execute(
+                    select(Question).where(Question.exam_id == exam.id).order_by(Question.number)
+                )
+            ).scalars().all()
+            for q in qs:
+                alts = q.alternatives or {}
+                enr = q.enrichment or {}
+                writer.writerow(
+                    [
+                        exam.filename,
+                        str(exam.id),
+                        q.number,
+                        q.section.value,
+                        q.question_type.value,
+                        q.enunciado,
+                        alts.get("A", ""),
+                        alts.get("B", ""),
+                        alts.get("C", ""),
+                        alts.get("D", ""),
+                        alts.get("E", ""),
+                        q.gabarito or "",
+                        q.confidence,
+                        enr.get("area", ""),
+                        enr.get("topic", ""),
+                        ", ".join(enr.get("keywords", [])),
+                        enr.get("difficulty", ""),
+                        enr.get("bloom_level", ""),
+                    ]
+                )
+        # utf-8-sig BOM so Excel auto-detects encoding
+        return Response(
+            content=buf.getvalue().encode("utf-8-sig"),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="exams_export.csv"'},
+        )
 
 
 # ---------------------------------------------------------------------------

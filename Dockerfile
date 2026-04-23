@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && groupadd --gid 1000 appgroup \
     && useradd --uid 1000 --gid 1000 --no-create-home --shell /bin/bash appuser
 
-# ---- Install uv for fast dependency installation ----
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# ---- Install uv for fast dependency installation (pinned version) ----
+COPY --from=ghcr.io/astral-sh/uv:0.7.3 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -52,8 +52,7 @@ RUN chmod +x /app/scripts/migrate.sh \
     && mkdir -p /usr/local/lib/python3.12/site-packages/rapidocr/models \
     && chown -R appuser:appgroup /app \
     && chown -R appuser:appgroup /opt/docling_models \
-    && chown -R appuser:appgroup /usr/local/lib/python3.12/site-packages/rapidocr \
-    && chmod -R a+rX /usr/local/lib/python3.12/site-packages/
+    && chown -R appuser:appgroup /usr/local/lib/python3.12/site-packages/rapidocr
 
 # ---- Switch to non-root user ----
 USER appuser

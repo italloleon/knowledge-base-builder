@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, HttpUrl, field_validator
 
@@ -65,8 +66,8 @@ class ExamResponse(BaseModel):
 
 
 class EnrichRequest(BaseModel):
-    mode: str = "missing"  # "missing" | "all"
-    provider: str | None = None  # None = use ENRICHMENT_PROVIDER from config; "ollama" | "gemini"
+    mode: Literal["missing", "all"] = "missing"
+    provider: Literal["ollama", "gemini"] | None = None
 
 
 class EnrichResponse(BaseModel):
@@ -122,6 +123,19 @@ class ParseErrorResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# --------------------------------------------------------------------------- #
+# Import                                                                        #
+# --------------------------------------------------------------------------- #
+
+
+class ImportResponse(BaseModel):
+    exams_created: int
+    exams_existing: int
+    questions_created: int
+    questions_skipped: int
+    questions_enrichment_updated: int
 
 
 # --------------------------------------------------------------------------- #
