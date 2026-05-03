@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -188,6 +189,8 @@ class Question(Base):
     raw_block: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     enrichment: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    explanation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    explanation_flagged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

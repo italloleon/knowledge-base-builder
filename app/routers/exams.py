@@ -21,6 +21,8 @@ from app.schemas import (
     EnrichRequest,
     EnrichResponse,
     ExamResponse,
+    ExplainRequest,
+    ExplainResponse,
     PaginatedQuestions,
     ParseErrorResponse,
     QuestionDetail,
@@ -234,6 +236,53 @@ async def trigger_enrich(
     provider_label = (body.provider or settings.ENRICHMENT_PROVIDER).lower()
     return EnrichResponse(
         message=f"Enrichment queued ({body.mode}, {provider_label})", queued=count
+    )
+
+
+# ---------------------------------------------------------------------------
+# Explanation enrichment trigger
+# ---------------------------------------------------------------------------
+
+
+@router.post("/exams/{exam_id}/explain", response_model=ExplainResponse, status_code=202)
+async def trigger_explain(
+    exam_id: uuid.UUID,
+    body: ExplainRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Queue gabarito comentado generation for questions that already have a gabarito.
+
+    Requires questions to have both a ``gabarito`` value and at least one alternative.
+    Only Gemini or Ollama is used (controlled by the ``provider`` field or the server
+    default ``ENRICHMENT_PROVIDER``).
+    """
+    if body.mode not in ("missing", "all"):
+        raise HTTPException(status_code=422, detail="mode must be 'missing' or 'all'")
+
+    exam_result = await session.execute(select(Exam).where(Exam.id == exam_id))
+    if not exam_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail=_EXAM_NOT_FOUND)
+
+    q_stmt = (
+        select(func.count(Question.id))
+        .where(Question.exam_id == exam_id)
+        .where(Question.gabarito.isnot(None))
+        .where(Question.alternatives != {})
+    )
+    if body.mode == "missing":
+        q_stmt = q_stmt.where(Question.explanation.is_(None))
+    count = (await session.execute(q_stmt)).scalar_one()
+
+    if count == 0:
+        return ExplainResponse(message="No questions to explain", queued=0)
+
+    pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
+    await pool.enqueue_job("enrich_explanation", str(exam_id), body.mode, body.provider)
+    await pool.aclose()
+
+    provider_label = (body.provider or settings.ENRICHMENT_PROVIDER).lower()
+    return ExplainResponse(
+        message=f"Explanation enrichment queued ({body.mode}, {provider_label})", queued=count
     )
 
 

@@ -506,12 +506,109 @@ async def enrich_edital(  # noqa: ARG001
 
 
 # ---------------------------------------------------------------------------
+# Explanation enrichment task
+# ---------------------------------------------------------------------------
+
+
+async def enrich_explanation(  # noqa: ARG001
+    ctx: dict, exam_id: str, mode: str, provider: str | None = None
+) -> None:
+    """Generate gabarito comentado for questions that already have a gabarito.
+
+    mode='missing': only questions where explanation IS NULL
+    mode='all':     all questions with a gabarito
+    provider='ollama'|'gemini': overrides ENRICHMENT_PROVIDER
+    """
+    resolved_provider = (provider or settings.ENRICHMENT_PROVIDER).lower()
+    logger.info(
+        "enrich_explanation started: exam_id=%s mode=%s provider=%s",
+        exam_id,
+        mode,
+        resolved_provider,
+    )
+
+    from app.pipeline.base import ParsedQuestion  # noqa: PLC0415
+
+    if resolved_provider == "gemini":
+        from app.pipeline.enrichers.explanation_gemini import generate_explanations  # noqa: PLC0415
+    else:
+        from app.pipeline.enrichers.explanation_ollama import generate_explanations  # noqa: PLC0415
+
+    async with _AsyncSession() as session:
+        stmt = (
+            select(Question)
+            .where(Question.exam_id == uuid.UUID(exam_id))
+            .where(Question.gabarito.isnot(None))
+            .where(Question.alternatives != {})
+        )
+        if mode == "missing":
+            stmt = stmt.where(Question.explanation.is_(None))
+        stmt = stmt.order_by(Question.number)
+
+        questions = (await session.execute(stmt)).scalars().all()
+
+        if not questions:
+            logger.info("enrich_explanation: nothing to explain for exam %s", exam_id)
+            return
+
+        logger.info("enrich_explanation: explaining %d questions", len(questions))
+
+        parsed = [
+            ParsedQuestion(
+                number=q.number,
+                section=q.section.value if hasattr(q.section, "value") else str(q.section),
+                question_type=q.question_type.value if hasattr(q.question_type, "value") else str(q.question_type),
+                enunciado=q.enunciado,
+                items=q.items,
+                alternatives=q.alternatives or {},
+                gabarito=q.gabarito,
+                raw_block="",
+                confidence=q.confidence,
+            )
+            for q in questions
+        ]
+        gabaritos = {q.number: q.gabarito for q in questions}  # type: ignore[misc]
+        enrichments = {q.number: q.enrichment for q in questions}
+        q_by_number = {q.number: q for q in questions}
+        explained_count = 0
+
+        try:
+            async for q_number, explanation in generate_explanations(
+                parsed,
+                gabaritos=gabaritos,
+                enrichments=enrichments,
+            ):
+                if explanation is not None:
+                    q_record = q_by_number.get(q_number)
+                    if q_record is not None:
+                        await session.execute(
+                            update(Question)
+                            .where(Question.id == q_record.id)
+                            .values(
+                                explanation=explanation,
+                                explanation_flagged=explanation.get("flagged", False),
+                            )
+                        )
+                        await session.commit()
+                        explained_count += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("enrich_explanation failed (partial): %s", exc)
+
+        logger.info(
+            "enrich_explanation done: exam_id=%s explained=%d/%d",
+            exam_id,
+            explained_count,
+            len(questions),
+        )
+
+
+# ---------------------------------------------------------------------------
 # ARQ WorkerSettings
 # ---------------------------------------------------------------------------
 
 
 class WorkerSettings:
-    functions = [process_document, enrich_exam, enrich_edital]
+    functions = [process_document, enrich_exam, enrich_edital, enrich_explanation]
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     max_jobs = 10
     job_timeout = 3600

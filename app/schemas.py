@@ -137,6 +137,8 @@ class QuestionSummary(BaseModel):
     gabarito: str | None
     confidence: float
     enrichment: dict | None
+    explanation: dict | None
+    explanation_flagged: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -207,6 +209,16 @@ class GabaritoCaderno(BaseModel):
 
 class GabaritoParseResponse(BaseModel):
     cadernos: list[GabaritoCaderno]
+
+
+class ExplainRequest(BaseModel):
+    mode: Literal["missing", "all"] = "missing"
+    provider: Literal["ollama", "gemini"] | None = None
+
+
+class ExplainResponse(BaseModel):
+    message: str
+    queued: int
 
 
 class ApplyGabaritoRequest(BaseModel):
