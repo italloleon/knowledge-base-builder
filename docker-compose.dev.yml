@@ -1,0 +1,25 @@
+# Development overrides — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Source code is mounted directly into the container so edits take effect
+# immediately without a rebuild.  Rebuild is only needed when pyproject.toml
+# dependencies change.
+
+services:
+
+  api:
+    # Single worker so --reload works; dev traffic is low anyway
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - uploads:/app/uploads
+      - ./app:/app/app
+      - ./worker:/app/worker
+      - ./migrations:/app/migrations
+
+  worker:
+    # watchfiles is bundled with uvicorn[standard] — restarts arq on any .py change
+    command: ["watchfiles", "python -m arq worker.tasks.WorkerSettings", "app", "worker"]
+    volumes:
+      - uploads:/app/uploads
+      - ./app:/app/app
+      - ./worker:/app/worker

@@ -46,6 +46,51 @@ class QuestionType(str, enum.Enum):
     unknown = "unknown"
 
 
+class Edital(Base):
+    __tablename__ = "editais"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Tier-1 scalar fields extracted via regex
+    numero_edital: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ano: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    edition_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    organizadora: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    instituicao_gestora: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    modalidade: Mapped[str | None] = mapped_column(Text, nullable=True)
+    total_questoes_gerais: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_questoes_especificas: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    percentual_minimo_aprovacao: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bolsa_mensal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    data_inicio_programas: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    contato_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    contato_telefone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    url_enare: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # Tier-2 JSONB fields extracted via LLM from Annexes
+    cronograma: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    vagas: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    instituicoes: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    knowledge_areas: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (UniqueConstraint("file_hash", name="uq_editais_file_hash"),)
+
+    exams: Mapped[list["Exam"]] = relationship(
+        "Exam", back_populates="edital", passive_deletes=True
+    )
+    jobs: Mapped[list["Job"]] = relationship(
+        "Job", back_populates="edital", passive_deletes=True
+    )
+
+
 class Exam(Base):
     __tablename__ = "exams"
 
@@ -54,12 +99,18 @@ class Exam(Base):
     )
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    edital_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("editais.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     __table_args__ = (UniqueConstraint("file_hash", name="uq_exams_file_hash"),)
 
+    edital: Mapped["Edital | None"] = relationship("Edital", back_populates="exams")
     jobs: Mapped[list["Job"]] = relationship("Job", back_populates="exam", passive_deletes=True)
     questions: Mapped[list["Question"]] = relationship("Question", back_populates="exam", passive_deletes=True)
     parse_errors: Mapped[list["ParseError"]] = relationship("ParseError", back_populates="exam", passive_deletes=True)
@@ -73,6 +124,9 @@ class Job(Base):
     )
     exam_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("exams.id", ondelete="SET NULL"), nullable=True
+    )
+    edital_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("editais.id", ondelete="SET NULL"), nullable=True
     )
     category: Mapped[DocumentCategory] = mapped_column(
         Enum(DocumentCategory, name="document_category_enum"),
@@ -97,6 +151,7 @@ class Job(Base):
     )
 
     exam: Mapped["Exam | None"] = relationship("Exam", back_populates="jobs")
+    edital: Mapped["Edital | None"] = relationship("Edital", back_populates="jobs")
     questions: Mapped[list["Question"]] = relationship("Question", back_populates="job")
     parse_error_records: Mapped[list["ParseError"]] = relationship(
         "ParseError", back_populates="job"

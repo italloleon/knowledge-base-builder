@@ -28,6 +28,7 @@ RUN uv pip install --system --no-cache \
     "pydantic-settings>=2.0" \
     "httpx>=0.27" \
     "docling>=2.0" \
+    "pdfminer.six>=20221105" \
     "python-multipart>=0.0.9" \
     "aiofiles>=23.0" \
     "redis>=5.0"

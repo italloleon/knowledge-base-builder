@@ -48,6 +48,8 @@ services:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
     env_file: .env
+    ports:
+      - "8000:8000"
     networks:
       - kbb-net
     depends_on:

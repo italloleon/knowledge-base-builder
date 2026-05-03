@@ -17,7 +17,7 @@ from sqlalchemy.future import select
 
 from app.config import settings
 from app.database import get_session
-from app.models import DocumentCategory, Exam, Job, JobStatus
+from app.models import DocumentCategory, Edital, Exam, Job, JobStatus
 from app.schemas import IngestResponse, IngestURLRequest
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
@@ -52,7 +52,7 @@ def _assert_no_ssrf(url: str) -> None:
 async def _enqueue_job(job_id: str) -> None:
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     pool = await create_pool(redis_settings)
-    await pool.enqueue_job("process_exam", job_id)
+    await pool.enqueue_job("process_document", job_id)
     await pool.aclose()
 
 
@@ -61,28 +61,41 @@ async def _get_or_create_exam(
     filename: str,
     file_hash: str,
 ) -> Exam:
-    """Return existing exam if hash matches, otherwise create a new one."""
     result = await session.execute(select(Exam).where(Exam.file_hash == file_hash))
     existing = result.scalar_one_or_none()
     if existing:
         return existing
-
-    exam = Exam(
-        id=uuid.uuid4(),
-        filename=filename,
-        file_hash=file_hash,
-    )
+    exam = Exam(id=uuid.uuid4(), filename=filename, file_hash=file_hash)
     session.add(exam)
     await session.flush()
     return exam
 
 
+async def _get_or_create_edital(
+    session: AsyncSession,
+    filename: str,
+    file_hash: str,
+) -> Edital:
+    result = await session.execute(select(Edital).where(Edital.file_hash == file_hash))
+    existing = result.scalar_one_or_none()
+    if existing:
+        return existing
+    edital = Edital(id=uuid.uuid4(), filename=filename, file_hash=file_hash)
+    session.add(edital)
+    await session.flush()
+    return edital
+
+
 async def _create_job(
-    session: AsyncSession, exam_id: uuid.UUID, category: DocumentCategory
+    session: AsyncSession,
+    category: DocumentCategory,
+    exam_id: uuid.UUID | None = None,
+    edital_id: uuid.UUID | None = None,
 ) -> Job:
     job = Job(
         id=uuid.uuid4(),
         exam_id=exam_id,
+        edital_id=edital_id,
         category=category,
         status=JobStatus.pending,
     )
@@ -100,20 +113,19 @@ async def _save_upload(content: bytes, filename: str) -> Path:
     return dest
 
 
+def _safe_filename(file_hash: str, original: str) -> str:
+    return f"{file_hash[:16]}_{Path(original).name}"
+
+
 @router.post("/upload", response_model=IngestResponse, status_code=202)
 async def ingest_upload(
     file: UploadFile = File(...),
     category: DocumentCategory = Form(...),
     session: AsyncSession = Depends(get_session),
 ):
-    # Validate content type
     if file.content_type not in ("application/pdf", "application/octet-stream"):
-        # Also allow if filename ends in .pdf
         if not (file.filename or "").lower().endswith(".pdf"):
-            raise HTTPException(
-                status_code=422,
-                detail="Only PDF files are accepted",
-            )
+            raise HTTPException(status_code=422, detail="Only PDF files are accepted")
 
     content = await file.read()
 
@@ -126,21 +138,27 @@ async def ingest_upload(
             detail=f"File exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB",
         )
 
-    # Verify PDF magic bytes
     if not content.startswith(b"%PDF"):
         raise HTTPException(status_code=422, detail="File does not appear to be a valid PDF")
 
     file_hash = hashlib.sha256(content).hexdigest()
-    safe_filename = f"{file_hash[:16]}_{Path(file.filename or 'upload').name}"
+    original_name = file.filename or "upload.pdf"
+    safe_name = _safe_filename(file_hash, original_name)
 
     async with session.begin():
-        exam = await _get_or_create_exam(session, file.filename or "upload.pdf", file_hash)
-        job = await _create_job(session, exam.id, category)
+        if category == DocumentCategory.edital:
+            edital = await _get_or_create_edital(session, original_name, file_hash)
+            job = await _create_job(session, category, edital_id=edital.id)
+            exam_id_out, edital_id_out = None, edital.id
+        else:
+            exam = await _get_or_create_exam(session, original_name, file_hash)
+            job = await _create_job(session, category, exam_id=exam.id)
+            exam_id_out, edital_id_out = exam.id, None
 
-    await _save_upload(content, safe_filename)
+    await _save_upload(content, safe_name)
     await _enqueue_job(str(job.id))
 
-    return IngestResponse(job_id=job.id, exam_id=exam.id)
+    return IngestResponse(job_id=job.id, exam_id=exam_id_out, edital_id=edital_id_out)
 
 
 @router.post("/url", response_model=IngestResponse, status_code=202)
@@ -153,12 +171,7 @@ async def ingest_url(
 
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=120.0,
-                write=10.0,
-                pool=5.0,
-            ),
+            timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=5.0),
             follow_redirects=False,
         ) as client:
             response = await client.get(url)
@@ -182,24 +195,27 @@ async def ingest_url(
         )
 
     if not content.startswith(b"%PDF"):
-        raise HTTPException(
-            status_code=422, detail="Downloaded content does not appear to be a valid PDF"
-        )
+        raise HTTPException(status_code=422, detail="Downloaded content does not appear to be a valid PDF")
 
-    # Derive filename from URL path
     url_path = url.split("?")[0]
-    original_filename = url_path.split("/")[-1] or "remote.pdf"
-    if not original_filename.lower().endswith(".pdf"):
-        original_filename += ".pdf"
+    original_name = url_path.split("/")[-1] or "remote.pdf"
+    if not original_name.lower().endswith(".pdf"):
+        original_name += ".pdf"
 
     file_hash = hashlib.sha256(content).hexdigest()
-    safe_filename = f"{file_hash[:16]}_{original_filename}"
+    safe_name = _safe_filename(file_hash, original_name)
 
     async with session.begin():
-        exam = await _get_or_create_exam(session, original_filename, file_hash)
-        job = await _create_job(session, exam.id, body.category)
+        if body.category == DocumentCategory.edital:
+            edital = await _get_or_create_edital(session, original_name, file_hash)
+            job = await _create_job(session, body.category, edital_id=edital.id)
+            exam_id_out, edital_id_out = None, edital.id
+        else:
+            exam = await _get_or_create_exam(session, original_name, file_hash)
+            job = await _create_job(session, body.category, exam_id=exam.id)
+            exam_id_out, edital_id_out = exam.id, None
 
-    await _save_upload(content, safe_filename)
+    await _save_upload(content, safe_name)
     await _enqueue_job(str(job.id))
 
-    return IngestResponse(job_id=job.id, exam_id=exam.id)
+    return IngestResponse(job_id=job.id, exam_id=exam_id_out, edital_id=edital_id_out)

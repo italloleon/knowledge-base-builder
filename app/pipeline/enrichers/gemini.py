@@ -12,6 +12,7 @@ import httpx
 
 from app.config import settings
 from app.pipeline.base import ParsedQuestion
+from app.pipeline.enrichers.taxonomy import enforce_taxonomy, taxonomy_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +35,28 @@ ALTERNATIVAS:
 
 Retorne um objeto JSON com exatamente estes campos:
 {{
-  "area": "grande área de enfermagem (ex: Saúde do Adulto e Idoso, Pediatria, Obstetrícia e Ginecologia, Saúde Mental, Urgência e Emergência, Atenção Básica, Gestão em Saúde, Farmacologia, etc.)",
-  "topic": "tópico específico dentro da área (ex: Insuficiência Cardíaca, Pré-natal, Esquizofrenia, RCP, etc.)",
+  "area": "grande área de enfermagem",
+  "topic": "tópico específico dentro da área",
+  "competencia_geral_area": "área da competência geral do edital",
+  "competencia_geral_topico": "item/tópico de Competências Gerais do edital",
+  "competencia_especifica_area": "área da competência específica do edital",
+  "competencia_especifica_topico": "item/tópico de Competências Específicas do edital",
   "keywords": ["lista", "de", "termos-chave", "relevantes", "da", "questão"],
   "difficulty": "facil, medio ou dificil",
   "bloom_level": "nível taxonômico de Bloom: conhecimento, compreensão, aplicação, análise, síntese ou avaliação"
 }}\
+"""
+
+_TAXONOMY_TEMPLATE = """\
+
+TAXONOMIA OFICIAL DO EDITAL (use somente estes valores para classificar):
+{taxonomy_json}
+
+REGRAS OBRIGATÓRIAS DE CLASSIFICAÇÃO:
+- Preencha os campos "competencia_geral_area" e "competencia_geral_topico" com valores EXATOS de competencias_gerais.
+- Preencha os campos "competencia_especifica_area" e "competencia_especifica_topico" com valores EXATOS de competencias_especificas.
+- O campo "area/topic" deve refletir a melhor área/tópico principal da questão na taxonomia oficial.
+- Nunca invente nomes fora da taxonomia.
 """
 
 
@@ -66,10 +83,19 @@ async def _enrich_one(
     client: httpx.AsyncClient,
     question: ParsedQuestion,
     semaphore: asyncio.Semaphore,
+    taxonomy_context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     async with semaphore:
         enunciado = question.enunciado[:2000]
         alternatives_text = _format_alternatives(question.alternatives)
+        user_prompt = _USER_TEMPLATE.format(
+            enunciado=enunciado,
+            alternatives=alternatives_text,
+        )
+        if taxonomy_context:
+            user_prompt += _TAXONOMY_TEMPLATE.format(
+                taxonomy_json=taxonomy_for_prompt(taxonomy_context)
+            )
 
         url = _GEMINI_URL.format(model=settings.GEMINI_MODEL)
         payload = {
@@ -79,10 +105,7 @@ async def _enrich_one(
                     "role": "user",
                     "parts": [
                         {
-                            "text": _USER_TEMPLATE.format(
-                                enunciado=enunciado,
-                                alternatives=alternatives_text,
-                            )
+                            "text": user_prompt
                         }
                     ],
                 }
@@ -108,6 +131,7 @@ async def _enrich_one(
             data = response.json()
             raw_content = data["candidates"][0]["content"]["parts"][0]["text"]
             enrichment = _extract_json(raw_content)
+            enrichment = enforce_taxonomy(enrichment, taxonomy_context)
             if enrichment is None:
                 logger.warning("Q%d: failed to parse JSON from Gemini response", question.number)
             return enrichment
@@ -127,7 +151,10 @@ async def _enrich_one(
         return None
 
 
-async def enrich_questions(questions: list[ParsedQuestion]):
+async def enrich_questions(
+    questions: list[ParsedQuestion],
+    taxonomy_context: dict[str, Any] | None = None,
+):
     """Async generator — yields (question_number, enrichment_dict | None).
 
     Uses Gemini API. Higher default concurrency than Ollama (cloud-based, fast).
@@ -150,7 +177,7 @@ async def enrich_questions(questions: list[ParsedQuestion]):
         for idx, q in enumerate(enrichable, start=1):
             logger.info("Stage 4 (Gemini): enriching Q%d (%d/%d)", q.number, idx, total)
             try:
-                result = await _enrich_one(client, q, semaphore)
+                result = await _enrich_one(client, q, semaphore, taxonomy_context)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Q%d: enrichment raised: %s", q.number, exc)
                 result = None

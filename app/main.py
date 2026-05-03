@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.middleware.auth import ApiKeyMiddleware
-from app.routers import exams, health, imports, ingestion, jobs
+from app.routers import editais, exams, gabarito, health, imports, ingestion, jobs
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -38,11 +38,13 @@ def create_app() -> FastAPI:
     application.add_middleware(ApiKeyMiddleware)
 
     # Routers
-    application.include_router(health.router)
-    application.include_router(ingestion.router)
-    application.include_router(imports.router)
-    application.include_router(jobs.router)
-    application.include_router(exams.router)
+    application.include_router(health.router, prefix="/api")
+    application.include_router(ingestion.router, prefix="/api")
+    application.include_router(imports.router, prefix="/api")
+    application.include_router(jobs.router, prefix="/api")
+    application.include_router(exams.router, prefix="/api")
+    application.include_router(editais.router, prefix="/api")
+    application.include_router(gabarito.router, prefix="/api")
 
     return application
 

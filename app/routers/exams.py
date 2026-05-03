@@ -70,6 +70,7 @@ async def list_exams(session: AsyncSession = Depends(get_session)):
                 id=exam.id,
                 filename=exam.filename,
                 file_hash=exam.file_hash,
+                edital_id=exam.edital_id,
                 question_count=qcount,
                 enriched_count=ecount,
                 created_at=exam.created_at,
