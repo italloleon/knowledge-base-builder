@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     Float,
@@ -47,6 +48,62 @@ class QuestionType(str, enum.Enum):
     unknown = "unknown"
 
 
+class OpinionTarget(str, enum.Enum):
+    question = "question"
+    alternative_a = "alternative_a"
+    alternative_b = "alternative_b"
+    alternative_c = "alternative_c"
+    alternative_d = "alternative_d"
+    alternative_e = "alternative_e"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    email: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        "RefreshToken", back_populates="user", passive_deletes=True
+    )
+    opinions: Mapped[list["QuestionOpinion"]] = relationship(
+        "QuestionOpinion", back_populates="user", passive_deletes=True
+    )
+    uploaded_exams: Mapped[list["Exam"]] = relationship(
+        "Exam", back_populates="uploaded_by", foreign_keys="Exam.uploaded_by_id"
+    )
+    uploaded_editais: Mapped[list["Edital"]] = relationship(
+        "Edital", back_populates="uploaded_by", foreign_keys="Edital.uploaded_by_id"
+    )
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="refresh_tokens")
+
+
 class Edital(Base):
     __tablename__ = "editais"
 
@@ -55,6 +112,11 @@ class Edital(Base):
     )
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    uploaded_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Tier-1 scalar fields extracted via regex
     numero_edital: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -84,6 +146,9 @@ class Edital(Base):
 
     __table_args__ = (UniqueConstraint("file_hash", name="uq_editais_file_hash"),)
 
+    uploaded_by: Mapped["User | None"] = relationship(
+        "User", back_populates="uploaded_editais", foreign_keys=[uploaded_by_id]
+    )
     exams: Mapped[list["Exam"]] = relationship(
         "Exam", back_populates="edital", passive_deletes=True
     )
@@ -105,16 +170,28 @@ class Exam(Base):
         ForeignKey("editais.id", ondelete="SET NULL"),
         nullable=True,
     )
+    uploaded_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     __table_args__ = (UniqueConstraint("file_hash", name="uq_exams_file_hash"),)
 
+    uploaded_by: Mapped["User | None"] = relationship(
+        "User", back_populates="uploaded_exams", foreign_keys=[uploaded_by_id]
+    )
     edital: Mapped["Edital | None"] = relationship("Edital", back_populates="exams")
     jobs: Mapped[list["Job"]] = relationship("Job", back_populates="exam", passive_deletes=True)
-    questions: Mapped[list["Question"]] = relationship("Question", back_populates="exam", passive_deletes=True)
-    parse_errors: Mapped[list["ParseError"]] = relationship("ParseError", back_populates="exam", passive_deletes=True)
+    questions: Mapped[list["Question"]] = relationship(
+        "Question", back_populates="exam", passive_deletes=True
+    )
+    parse_errors: Mapped[list["ParseError"]] = relationship(
+        "ParseError", back_populates="exam", passive_deletes=True
+    )
 
 
 class Job(Base):
@@ -197,6 +274,9 @@ class Question(Base):
 
     exam: Mapped["Exam"] = relationship("Exam", back_populates="questions")
     job: Mapped["Job"] = relationship("Job", back_populates="questions")
+    opinions: Mapped[list["QuestionOpinion"]] = relationship(
+        "QuestionOpinion", back_populates="question", passive_deletes=True
+    )
 
 
 class ParseError(Base):
@@ -219,3 +299,43 @@ class ParseError(Base):
 
     exam: Mapped["Exam"] = relationship("Exam", back_populates="parse_errors")
     job: Mapped["Job"] = relationship("Job", back_populates="parse_error_records")
+
+
+class QuestionOpinion(Base):
+    __tablename__ = "question_opinions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("questions.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    target: Mapped[OpinionTarget] = mapped_column(
+        Enum(OpinionTarget, name="opinion_target_enum"),
+        nullable=False,
+        default=OpinionTarget.question,
+    )
+    body: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        info={"check": "char_length(body) <= 5000"},
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint("char_length(body) <= 5000", name="ck_opinion_body_length"),
+    )
+
+    question: Mapped["Question"] = relationship("Question", back_populates="opinions")
+    user: Mapped["User"] = relationship("User", back_populates="opinions")

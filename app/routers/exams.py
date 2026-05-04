@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_session
@@ -61,6 +62,7 @@ async def list_exams(session: AsyncSession = Depends(get_session)):
         )
         .outerjoin(q_count_subq, Exam.id == q_count_subq.c.exam_id)
         .outerjoin(enriched_count_subq, Exam.id == enriched_count_subq.c.exam_id)
+        .options(selectinload(Exam.uploaded_by))
         .order_by(Exam.created_at.desc())
     )
     rows = (await session.execute(stmt)).all()
@@ -73,6 +75,7 @@ async def list_exams(session: AsyncSession = Depends(get_session)):
                 filename=exam.filename,
                 file_hash=exam.file_hash,
                 edital_id=exam.edital_id,
+                uploaded_by=exam.uploaded_by,
                 question_count=qcount,
                 enriched_count=ecount,
                 created_at=exam.created_at,

@@ -31,7 +31,10 @@ RUN uv pip install --system --no-cache \
     "pdfminer.six>=20221105" \
     "python-multipart>=0.0.9" \
     "aiofiles>=23.0" \
-    "redis>=5.0"
+    "redis>=5.0" \
+    "python-jose[cryptography]>=3.3" \
+    "bcrypt>=4.0" \
+    "email-validator>=2.0"
 
 # ---- Pre-download Docling models so the container runs fully offline ----
 ENV DOCLING_ARTIFACTS_PATH=/opt/docling_models

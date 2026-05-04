@@ -1,10 +1,62 @@
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, EmailStr, StringConstraints, field_validator
 
-from app.models import DocumentCategory, JobStatus, QuestionType, SectionType
+from app.models import DocumentCategory, JobStatus, OpinionTarget, QuestionType, SectionType
+
+
+# --------------------------------------------------------------------------- #
+# User                                                                          #
+# --------------------------------------------------------------------------- #
+
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    full_name: str
+    password: Annotated[str, StringConstraints(min_length=8)]
+
+
+class UserUpdate(BaseModel):
+    full_name: str | None = None
+    email: EmailStr | None = None
+    password: Annotated[str, StringConstraints(min_length=8)] | None = None
+
+
+class UserResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    full_name: str
+    is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# --------------------------------------------------------------------------- #
+# Auth tokens                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class AccessTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 
 # --------------------------------------------------------------------------- #
@@ -60,6 +112,7 @@ class EditalResponse(BaseModel):
     id: uuid.UUID
     filename: str
     file_hash: str
+    uploaded_by: UserResponse | None
     numero_edital: str | None
     ano: int | None
     edition_name: str | None
@@ -102,6 +155,7 @@ class ExamResponse(BaseModel):
     filename: str
     file_hash: str
     edital_id: uuid.UUID | None
+    uploaded_by: UserResponse | None
     question_count: int
     enriched_count: int
     created_at: datetime
@@ -228,6 +282,33 @@ class ApplyGabaritoRequest(BaseModel):
 class ApplyGabaritoResponse(BaseModel):
     updated: int
     annulled: int
+
+
+# --------------------------------------------------------------------------- #
+# Opinion                                                                       #
+# --------------------------------------------------------------------------- #
+
+
+class OpinionCreate(BaseModel):
+    target: OpinionTarget = OpinionTarget.question
+    body: Annotated[str, StringConstraints(min_length=1, max_length=5000)]
+
+
+class OpinionUpdate(BaseModel):
+    body: Annotated[str, StringConstraints(min_length=1, max_length=5000)]
+
+
+class OpinionResponse(BaseModel):
+    id: uuid.UUID
+    question_id: uuid.UUID
+    user_id: uuid.UUID
+    author: UserResponse
+    target: OpinionTarget
+    body: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 # --------------------------------------------------------------------------- #

@@ -8,10 +8,14 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "/app/uploads"
     MAX_UPLOAD_SIZE_MB: int = 50
     AUTH_ENABLED: bool = True
-    API_KEY: str = ""
     # Comma-separated list of allowed CORS origins, e.g. http://1.2.3.4:8080
     ALLOWED_ORIGINS: str = ""
     LOG_LEVEL: str = "INFO"
+
+    # JWT auth
+    JWT_SECRET_KEY: str = ""
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # Ollama (local LLM)
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
@@ -32,10 +36,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
-    def check_api_key_when_auth_enabled(self) -> "Settings":
-        if self.AUTH_ENABLED and not self.API_KEY:
+    def check_jwt_key_when_auth_enabled(self) -> "Settings":
+        if self.AUTH_ENABLED and not self.JWT_SECRET_KEY:
             raise ValueError(
-                "API_KEY must be set when AUTH_ENABLED=true. "
+                "JWT_SECRET_KEY must be set when AUTH_ENABLED=true. "
                 "Generate one with: openssl rand -hex 32"
             )
         return self

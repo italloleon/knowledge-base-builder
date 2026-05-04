@@ -10,6 +10,7 @@ from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_session
@@ -39,7 +40,11 @@ def _safe_filename(file_hash: str, original: str) -> str:
 @router.get("/editais", response_model=list[EditalResponse])
 async def list_editais(session: AsyncSession = Depends(get_session)):
     rows = (
-        await session.execute(select(Edital).order_by(Edital.created_at.desc()))
+        await session.execute(
+            select(Edital)
+            .options(selectinload(Edital.uploaded_by))
+            .order_by(Edital.created_at.desc())
+        )
     ).scalars().all()
     return rows
 
@@ -47,7 +52,11 @@ async def list_editais(session: AsyncSession = Depends(get_session)):
 @router.get("/editais/{edital_id}", response_model=EditalResponse)
 async def get_edital(edital_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     edital = (
-        await session.execute(select(Edital).where(Edital.id == edital_id))
+        await session.execute(
+            select(Edital)
+            .where(Edital.id == edital_id)
+            .options(selectinload(Edital.uploaded_by))
+        )
     ).scalar_one_or_none()
     if not edital:
         raise HTTPException(status_code=404, detail=_EDITAL_NOT_FOUND)
@@ -167,6 +176,7 @@ async def list_edital_exams(
         .where(Exam.edital_id == edital_id)
         .outerjoin(q_count_subq, Exam.id == q_count_subq.c.exam_id)
         .outerjoin(enriched_count_subq, Exam.id == enriched_count_subq.c.exam_id)
+        .options(selectinload(Exam.uploaded_by))
         .order_by(Exam.created_at.desc())
     )
     rows = (await session.execute(stmt)).all()
@@ -177,6 +187,7 @@ async def list_edital_exams(
             filename=exam.filename,
             file_hash=exam.file_hash,
             edital_id=exam.edital_id,
+            uploaded_by=exam.uploaded_by,
             question_count=qcount,
             enriched_count=ecount,
             created_at=exam.created_at,
@@ -224,11 +235,19 @@ async def link_exam_to_edital(
         )
     ).scalar_one()
 
+    # Reload with uploaded_by for the response
+    exam = (
+        await session.execute(
+            select(Exam).where(Exam.id == exam_id).options(selectinload(Exam.uploaded_by))
+        )
+    ).scalar_one()
+
     return ExamResponse(
         id=exam.id,
         filename=exam.filename,
         file_hash=exam.file_hash,
         edital_id=exam.edital_id,
+        uploaded_by=exam.uploaded_by,
         question_count=q_count,
         enriched_count=enriched_count,
         created_at=exam.created_at,

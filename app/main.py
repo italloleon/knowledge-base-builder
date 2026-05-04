@@ -6,8 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.middleware.auth import ApiKeyMiddleware
-from app.routers import editais, exams, gabarito, health, imports, ingestion, jobs
+from app.routers import auth, editais, exams, gabarito, health, imports, ingestion, jobs, opinions, users
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -30,21 +29,21 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Content-Type", "X-API-Key"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_headers=["Content-Type", "Authorization"],
     )
-
-    # API key auth (passthrough when AUTH_ENABLED=false)
-    application.add_middleware(ApiKeyMiddleware)
 
     # Routers
     application.include_router(health.router, prefix="/api")
+    application.include_router(auth.router, prefix="/api")
+    application.include_router(users.router, prefix="/api")
     application.include_router(ingestion.router, prefix="/api")
     application.include_router(imports.router, prefix="/api")
     application.include_router(jobs.router, prefix="/api")
     application.include_router(exams.router, prefix="/api")
     application.include_router(editais.router, prefix="/api")
     application.include_router(gabarito.router, prefix="/api")
+    application.include_router(opinions.router, prefix="/api")
 
     return application
 
