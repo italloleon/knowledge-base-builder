@@ -36,10 +36,8 @@ RUN uv pip install --system --no-cache \
     "bcrypt>=4.0" \
     "email-validator>=2.0"
 
-# ---- Pre-download Docling models so the container runs fully offline ----
+# ---- Docling model path — models are downloaded into a named volume at first run ----
 ENV DOCLING_ARTIFACTS_PATH=/opt/docling_models
-RUN mkdir -p /opt/docling_models \
-    && docling-tools models download --output-dir /opt/docling_models
 
 # ---- Copy application source ----
 COPY app/ ./app/
@@ -53,6 +51,7 @@ COPY scripts/ ./scripts/
 # first use; chown lets appuser write there without needing root at runtime.
 RUN chmod +x /app/scripts/migrate.sh \
     && mkdir -p /app/uploads \
+    && mkdir -p /opt/docling_models \
     && mkdir -p /usr/local/lib/python3.12/site-packages/rapidocr/models \
     && chown -R appuser:appgroup /app \
     && chown -R appuser:appgroup /opt/docling_models \

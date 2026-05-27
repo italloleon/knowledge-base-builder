@@ -33,6 +33,25 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  model-init:
+    build: .
+    command: >
+      sh -c "
+        if [ ! -f /opt/docling_models/.initialized ]; then
+          echo 'Downloading Docling models...' &&
+          docling-tools models download --output-dir /opt/docling_models &&
+          touch /opt/docling_models/.initialized &&
+          echo 'Models ready.'
+        else
+          echo 'Docling models already present, skipping download.'
+        fi
+      "
+    volumes:
+      - docling_models:/opt/docling_models
+    networks:
+      - kbb-net
+    restart: on-failure
+
   migrate:
     build: .
     command: ["sh", "scripts/migrate.sh"]
@@ -57,8 +76,11 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
     volumes:
       - uploads:/app/uploads
+      - docling_models:/opt/docling_models
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health/live || exit 1"]
       interval: 10s
@@ -78,14 +100,18 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
     volumes:
       - uploads:/app/uploads
+      - docling_models:/opt/docling_models
     restart: unless-stopped
 
 volumes:
   pgdata:
   redisdata:
   uploads:
+  docling_models:
 
 networks:
   kbb-net:
