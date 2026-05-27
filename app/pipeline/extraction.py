@@ -1,6 +1,5 @@
-"""Stage 1 — PDF to Markdown via Docling."""
+"""Stage 1 — PDF to text via PyMuPDF (no ML models required)."""
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -8,76 +7,70 @@ from pathlib import Path
 @dataclass
 class ExtractionResult:
     markdown: str
-    # {ref_key: png_bytes} — one entry per figure Docling detected in the PDF.
-    # ref_key matches the alt-text in the markdown image tag, e.g. "picture-3".
+    # {ref_key: png_bytes} — one entry per figure detected in the PDF.
     images: dict[str, bytes] = field(default_factory=dict)
 
 
 def extract_markdown(pdf_path: Path) -> str:
-    """Convert a PDF file to Markdown using Docling (text only, no images).
-
-    Raises ValueError if the output is suspiciously short (< 100 chars).
-    Kept for backwards-compatibility with the edital pipeline which doesn't
-    need images.
-    """
+    """Convert a PDF to text. Kept for compatibility with the edital pipeline."""
     return extract(pdf_path).markdown
 
 
 def extract(pdf_path: Path) -> ExtractionResult:
-    """Convert a PDF to Markdown and extract embedded figures as PNG bytes.
+    """Convert a PDF to plain text and extract embedded figures as PNG bytes.
 
-    Images are saved by index (0, 1, 2, …) and the markdown uses numbered
-    placeholders ``<!-- image:0 -->``, ``<!-- image:1 -->``, etc. so parsers
-    can map each placeholder to its saved file.
+    Text blocks and images are interleaved by their vertical position on each
+    page, so image placeholders (<!-- image:N -->) appear near the question
+    they belong to. The parser downstream handles the placeholders.
 
-    Raises ValueError if the markdown output is suspiciously short.
+    Raises ValueError if the output is suspiciously short (< 100 chars).
     """
-    import io as _io
-    import re as _re
+    import fitz  # pymupdf
 
-    from docling.datamodel.base_models import InputFormat  # noqa: PLC0415
-    from docling.datamodel.pipeline_options import PdfPipelineOptions  # noqa: PLC0415
-    from docling.document_converter import DocumentConverter, PdfFormatOption  # noqa: PLC0415
-
-    artifacts_path = os.getenv("DOCLING_ARTIFACTS_PATH")
-    pipeline_options = PdfPipelineOptions(
-        **({"artifacts_path": artifacts_path} if artifacts_path else {}),
-        generate_picture_images=True,
-    )
-    converter = DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-    )
-    result = converter.convert(str(pdf_path))
-
-    # Default export uses <!-- image --> as placeholder for every figure.
-    # Number them sequentially so parsers can reference them by index.
-    counter = _re.compile(r"<!-- image -->")
-    _idx = 0
-
-    def _replace(m: _re.Match) -> str:  # noqa: ANN001
-        nonlocal _idx
-        out = f"<!-- image:{_idx} -->"
-        _idx += 1
-        return out
-
-    md: str = counter.sub(_replace, result.document.export_to_markdown())
-
-    if not md or len(md.strip()) < 100:
-        raise ValueError(
-            f"Extraction produced suspiciously short output: {len(md.strip() if md else '')} chars"
-        )
-
-    # Extract picture bytes using Docling v2 API: PictureItem.get_image(doc)
+    doc = fitz.open(str(pdf_path))
+    parts: list[str] = []
     images: dict[str, bytes] = {}
-    for idx, pic in enumerate(getattr(result.document, "pictures", [])):
-        try:
-            pil_img = pic.get_image(result.document)
-            if pil_img is None:
-                continue
-            buf = _io.BytesIO()
-            pil_img.save(buf, format="PNG")
-            images[str(idx)] = buf.getvalue()
-        except Exception:  # noqa: BLE001
-            pass
+    img_idx = 0
 
+    for page in doc:
+        # Collect text blocks: (x0, y0, x1, y1, text, block_no, block_type)
+        # block_type 0 = text, 1 = image placeholder from PDF structure
+        text_blocks: list[tuple[float, str]] = []
+        for b in page.get_text("blocks"):
+            if b[6] == 0 and b[4].strip():
+                text_blocks.append((b[1], b[4].strip()))
+
+        # Collect rasterised images with their top-left y coordinate
+        image_blocks: list[tuple[float, str]] = []
+        seen_xrefs: set[int] = set()
+        for img_info in page.get_images(full=True):
+            xref = img_info[0]
+            if xref in seen_xrefs:
+                continue
+            seen_xrefs.add(xref)
+            rects = page.get_image_rects(xref)
+            if not rects:
+                continue
+            y0 = rects[0].y0
+            try:
+                pix = fitz.Pixmap(doc, xref)
+                if pix.n > 4:  # CMYK/alpha → RGB
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                if pix.width < 10 or pix.height < 10:  # skip decorative dots/lines
+                    continue
+                images[str(img_idx)] = pix.tobytes("png")
+                image_blocks.append((y0, f"<!-- image:{img_idx} -->"))
+                img_idx += 1
+            except Exception:
+                pass
+
+        # Interleave by vertical position and append to output
+        for _, content in sorted(text_blocks + image_blocks, key=lambda x: x[0]):
+            parts.append(content)
+
+    md = "\n".join(parts)
+    if len(md.strip()) < 100:
+        raise ValueError(
+            f"Extraction produced suspiciously short output: {len(md.strip())} chars"
+        )
     return ExtractionResult(markdown=md, images=images)

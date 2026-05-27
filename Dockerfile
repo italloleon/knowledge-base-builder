@@ -27,7 +27,7 @@ RUN uv pip install --system --no-cache \
     "arq>=0.26" \
     "pydantic-settings>=2.0" \
     "httpx>=0.27" \
-    "docling>=2.0" \
+    "pymupdf>=1.24" \
     "pdfminer.six>=20221105" \
     "python-multipart>=0.0.9" \
     "aiofiles>=23.0" \
@@ -36,9 +36,6 @@ RUN uv pip install --system --no-cache \
     "bcrypt>=4.0" \
     "email-validator>=2.0"
 
-# ---- Docling model path — models are downloaded into a named volume at first run ----
-ENV DOCLING_ARTIFACTS_PATH=/opt/docling_models
-
 # ---- Copy application source ----
 COPY app/ ./app/
 COPY worker/ ./worker/
@@ -46,16 +43,10 @@ COPY migrations/ ./migrations/
 COPY alembic.ini ./
 COPY scripts/ ./scripts/
 
-# ---- Ensure scripts are executable, uploads dir exists, and model cache is writable ----
-# rapidocr downloads .pth/.onnx models lazily into its own package directory on
-# first use; chown lets appuser write there without needing root at runtime.
+# ---- Permissions ----
 RUN chmod +x /app/scripts/migrate.sh \
     && mkdir -p /app/uploads \
-    && mkdir -p /opt/docling_models \
-    && mkdir -p /usr/local/lib/python3.12/site-packages/rapidocr/models \
-    && chown -R appuser:appgroup /app \
-    && chown -R appuser:appgroup /opt/docling_models \
-    && chown -R appuser:appgroup /usr/local/lib/python3.12/site-packages/rapidocr
+    && chown -R appuser:appgroup /app
 
 # ---- Switch to non-root user ----
 USER appuser
