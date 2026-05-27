@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, EmailStr, StringConstraints, field_validator
+from pydantic import BaseModel, EmailStr, Field, StringConstraints, field_validator
 
 from app.models import DocumentCategory, JobStatus, OpinionTarget, QuestionType, SectionType
 
@@ -158,14 +158,27 @@ class ExamResponse(BaseModel):
     uploaded_by: UserResponse | None
     question_count: int
     enriched_count: int
+    nome: str | None
+    periodo: str | None
+    tipo: int | None
+    cor: str | None
+    tipo_prova: str | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
+class ExamUpdate(BaseModel):
+    nome: str | None = None
+    periodo: Annotated[str | None, StringConstraints(pattern=r"^(manha|tarde)$")] = None
+    tipo: int | None = None
+    cor: str | None = None
+    tipo_prova: str | None = None
+
+
 class EnrichRequest(BaseModel):
     mode: Literal["missing", "all"] = "missing"
-    provider: Literal["ollama", "gemini"] | None = None
+    provider: str | None = None
 
 
 class EnrichResponse(BaseModel):
@@ -193,6 +206,8 @@ class QuestionSummary(BaseModel):
     enrichment: dict | None
     explanation: dict | None
     explanation_flagged: bool
+    explanation_insight: str | None
+    images: list[str] | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -267,12 +282,35 @@ class GabaritoParseResponse(BaseModel):
 
 class ExplainRequest(BaseModel):
     mode: Literal["missing", "all"] = "missing"
-    provider: Literal["ollama", "gemini"] | None = None
+    provider: str | None = None
 
 
 class ExplainResponse(BaseModel):
     message: str
     queued: int
+
+
+class ExplanationRefineRequest(BaseModel):
+    insight: Annotated[str, StringConstraints(min_length=1, max_length=10000)]
+    provider: str | None = None
+
+
+class ExplanationRefineResponse(BaseModel):
+    message: str
+    question_id: uuid.UUID
+
+
+class ExplainQuestionRequest(BaseModel):
+    provider: str | None = None
+
+
+class UpdateGabaritoRequest(BaseModel):
+    gabarito: Annotated[str | None, StringConstraints(pattern=r"^[A-E]$")] = None
+
+
+class UpdateGabaritoResponse(BaseModel):
+    question_id: uuid.UUID
+    gabarito: str | None
 
 
 class ApplyGabaritoRequest(BaseModel):
@@ -309,6 +347,79 @@ class OpinionResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# --------------------------------------------------------------------------- #
+# Study workspace (timer + notes)                                               #
+# --------------------------------------------------------------------------- #
+
+
+class StudySessionStartRequest(BaseModel):
+    planned_duration_seconds: int | None = Field(
+        None,
+        ge=60,
+        le=28800,
+        description="Optional goal length in seconds (e.g. 1500 for 25 min)",
+    )
+
+
+class StudySessionResponse(BaseModel):
+    id: uuid.UUID
+    planned_duration_seconds: int | None
+    started_at: datetime
+    ended_at: datetime | None
+    duration_seconds: int | None
+
+    model_config = {"from_attributes": True}
+
+
+class StudySessionWithNotesResponse(StudySessionResponse):
+    notes: list["StudyNoteResponse"] = Field(default_factory=list)
+
+
+class StudyMetricsResponse(BaseModel):
+    total_seconds_week: int
+    session_count_week: int
+    total_seconds_all: int
+    session_count_all: int
+
+
+class StudyNoteCreate(BaseModel):
+    title: Annotated[str | None, StringConstraints(max_length=512)] = None
+    body: Annotated[str, StringConstraints(max_length=50000)] = ""
+    tags: list[Annotated[str, StringConstraints(max_length=240, min_length=1)]] = Field(
+        default_factory=list,
+        max_length=40,
+    )
+    study_session_id: uuid.UUID | None = Field(
+        None,
+        description="Optional live timer session to attach this note to (must still be running).",
+    )
+
+
+class StudyNoteUpdate(BaseModel):
+    title: Annotated[str | None, StringConstraints(max_length=512)] | None = None
+    body: Annotated[str | None, StringConstraints(max_length=50000)] | None = None
+    tags: list[Annotated[str, StringConstraints(max_length=240, min_length=1)]] | None = Field(
+        default=None,
+        max_length=40,
+    )
+
+
+class StudyNoteResponse(BaseModel):
+    id: uuid.UUID
+    title: str | None
+    body: str
+    tags: list[str]
+    study_session_id: uuid.UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TagOptionsResponse(BaseModel):
+    tags: list[str]
 
 
 # --------------------------------------------------------------------------- #

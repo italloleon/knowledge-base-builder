@@ -3,14 +3,20 @@
 import re
 from dataclasses import dataclass, field
 
-# Matches caderno section headers, e.g.:
-#   "Residência Multi/Uniprofissional - Enfermagem - 1 - Turno Tarde"
+# Matches caderno section headers in two known ENARE formats:
+#   "Residência Multi/Uniprofissional - Enfermagem - 1 - Turno Tarde"  (final gabarito)
+#   "ENFERMAGEM (ENFERMT01) - PROVA TIPO  1"                           (gabarito preliminar)
 _CADERNO_SPLIT_RE = re.compile(
-    r"(Resid[êe]ncia\s+(?:Multi/Uniprofissional|Uniprofissional|Multi)\b[^\n]+)",
+    r"(Resid[êe]ncia\s+(?:Multi/Uniprofissional|Uniprofissional|Multi)\b[^\n]+"
+    r"|[A-ZÁÉÍÓÚÂÊÔÀÃÕÜÇ][A-ZÁÉÍÓÚÂÊÔÀÃÕÜÇ/ ]+\([A-Z0-9]+\)\s*-\s*PROVA\s+TIPO\s+\d+"
+    r"|\*{0,2}[A-ZÁÉÍÓÚÂÊÔÀÃÕÜÇ][A-ZÁÉÍÓÚÂÊÔÀÃÕÜÇa-záéíóúâêôàãõüç/ ]+\s*-\s*PROVA\s+\d+\*{0,2})",
     re.IGNORECASE,
 )
 
 _FOOTNOTE_RE = re.compile(r"\*\s*Quest[aã]o\s+anulada", re.IGNORECASE)
+
+# Two question numbers on a single pdfminer line, e.g. "99  100" or "79 80"
+_TWO_NUMS_RE = re.compile(r"^(\d{1,3})\s+(\d{1,3})$")
 
 
 @dataclass
@@ -50,10 +56,70 @@ def parse_gabarito(text: str) -> list[CadernoAnswers]:
 
         combined = q1_4_text + "\n" + body_main
         answers = _extract_answers(combined)
+
+        # Two-column page recovery — backward: some gabarito PDFs place Q1-5 for
+        # the SECOND caderno on a page inside the body TWO sections earlier.
+        # Use "first-occurrence wins" so we get the first caderno's data.
+        if 1 not in answers and i >= 3:
+            two_back_text = _first_q1_5_block_after_pagebreak(parts[i - 3])
+            if two_back_text:
+                extra = _extract_answers_first_wins(two_back_text)
+                for q, a in extra.items():
+                    if q not in answers:
+                        answers[q] = a
+
+        # Two-column page recovery — forward: Q16-20 groups for the FIRST caderno
+        # on a two-column page appear as the FIRST occurrence in the body TWO
+        # sections ahead.  Only trigger when answers are suspiciously few.
+        if 16 not in answers and len(answers) < 80 and i + 3 < len(parts):
+            fwd_text = _q16_section(parts[i + 3])
+            if fwd_text:
+                extra = _extract_answers_first_wins(fwd_text)
+                for q, a in extra.items():
+                    if q not in answers:
+                        answers[q] = a
+
         if answers:
             cadernos.append(CadernoAnswers(name=name, answers=answers))
 
     return cadernos
+
+
+def _q16_section(text: str) -> str:
+    """Return the portion of *text* starting from the first Q16 token onwards.
+
+    Two-column pages write Q16-20 data for BOTH cadernos in the body of the
+    second caderno, with the first caderno's data appearing before the second's.
+    Slicing to Q16+ and using first-occurrence wins gives the first caderno's
+    Q16-20 answers without contamination from Q6-15 of the second caderno.
+    """
+    typed = _tokenise(text)
+    start = next((i for i, t in enumerate(typed) if t == ("num", 16)), None)
+    if start is None:
+        return ""
+    # Re-serialise just the tokens from Q16 onwards into a synthetic text that
+    # _extract_answers_first_wins can process (it re-tokenises internally).
+    # The simplest way is to return the original text sliced to the position
+    # of Q16 — find the char offset of the first "16" occurrence.
+    idx16 = text.find("\n16\n")
+    if idx16 == -1:
+        idx16 = text.find("\n16 \n")
+    if idx16 == -1:
+        return ""
+    return text[idx16:]
+
+
+def _first_q1_5_block_after_pagebreak(text: str) -> str:
+    """Return all text after the last page-break in *text*.
+
+    Two-column gabarito pages write the pre-header Q1-5 data for BOTH cadernos
+    after the page-break of the preceding standalone caderno.  The second
+    caderno's data appears first (left column), so "first-occurrence wins"
+    extraction gives the right answers.
+    """
+    if "\x0c" not in text:
+        return ""
+    return text.rsplit("\x0c", 1)[1]
 
 
 def _extract_answers(text: str) -> dict[int, str | None]:
@@ -73,21 +139,63 @@ def _extract_answers(text: str) -> dict[int, str | None]:
     if table_result:
         return table_result
 
-    # Tokenise line-by-line: pdfminer emits each value on its own line
-    # (separated by \n\n), so "Página 4 de 22" is one line and must be
-    # ignored — only lines whose entire content is a single number or letter
-    # are valid tokens.
+    typed = _tokenise(text)
+    return _pairs_to_map(_group_pairs(typed))
+
+
+def _extract_answers_first_wins(text: str) -> dict[int, str | None]:
+    """Like _extract_answers but keeps the FIRST occurrence of each question.
+
+    Used when recovering Q1-5 data from a two-column page section where the
+    target caderno's data appears before the neighbouring caderno's data.
+    """
+    table_result = _parse_table(text)
+    if table_result:
+        return table_result  # tables are already positional
+
+    typed = _tokenise(text)
+    pairs = _group_pairs(typed)
+    result: dict[int, str | None] = {}
+    for num, ans in pairs:
+        if 1 <= num <= 100 and num not in result:
+            result[num] = None if ans == "*" else ans
+    return result
+
+
+def _tokenise(text: str) -> list[tuple[str, int | str]]:
+    """Convert pdfminer text into a stream of ("num", N) / ("ans", A) tokens.
+
+    Handles the common case where two consecutive question numbers appear on
+    the same line (e.g. "99  100" or "79  80") by splitting them into two
+    separate num-tokens.  Without this, the trailing answer tokens for those
+    questions become orphaned and corrupt the answer-group immediately before
+    them (the N-nums vs M-answers mismatch causes the whole group to be
+    dropped).
+    """
     typed: list[tuple[str, int | str]] = []
     for raw_line in text.splitlines():
         tok = re.sub(r"\*{2,}", "", raw_line).strip()
+
+        # Two numbers on one line — split into two num-tokens
+        m2 = _TWO_NUMS_RE.match(tok)
+        if m2:
+            n1, n2 = int(m2.group(1)), int(m2.group(2))
+            if 1 <= n1 <= 100:
+                typed.append(("num", n1))
+            if 1 <= n2 <= 100:
+                typed.append(("num", n2))
+            continue
+
         if tok.isdigit() and 1 <= int(tok) <= 100:
             typed.append(("num", int(tok)))
         elif tok in ("A", "B", "C", "D", "E", "*"):
             typed.append(("ans", tok))
 
-    # Walk the token stream grouping consecutive runs of numbers with the
-    # immediately following run of answers (handles both alternating 1:1 and
-    # grouped N:N layouts).
+    return typed
+
+
+def _group_pairs(typed: list[tuple[str, int | str]]) -> list[tuple[int, str]]:
+    """Walk the token stream grouping consecutive num-runs with answer-runs."""
     pairs: list[tuple[int, str]] = []
     idx = 0
     while idx < len(typed):
@@ -105,8 +213,7 @@ def _extract_answers(text: str) -> dict[int, str | None]:
             # If counts differ the group is malformed — skip rather than mis-pair
         else:
             idx += 1
-
-    return _pairs_to_map(pairs)
+    return pairs
 
 
 def _pairs_to_map(pairs) -> dict[int, str | None]:

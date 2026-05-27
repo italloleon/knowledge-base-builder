@@ -22,17 +22,47 @@ from app.schemas import (
     EnrichRequest,
     EnrichResponse,
     ExamResponse,
+    ExamUpdate,
     ExplainRequest,
     ExplainResponse,
+    ExplanationRefineRequest,
+    ExplanationRefineResponse,
+    ExplainQuestionRequest,
     PaginatedQuestions,
     ParseErrorResponse,
     QuestionDetail,
     QuestionSummary,
+    UpdateGabaritoRequest,
+    UpdateGabaritoResponse,
 )
 
 router = APIRouter(tags=["exams"])
 
 _EXAM_NOT_FOUND = "Exam not found"
+
+
+# ---------------------------------------------------------------------------
+# Image serving
+# ---------------------------------------------------------------------------
+
+@router.get("/images/{file_path:path}", include_in_schema=False)
+async def serve_image(file_path: str):
+    """Serve a question image by its relative path under UPLOAD_DIR."""
+    from app.config import settings  # noqa: PLC0415
+
+    safe = Path(settings.UPLOAD_DIR) / Path(file_path)
+    # Prevent path traversal: resolved path must stay inside UPLOAD_DIR
+    try:
+        safe = safe.resolve()
+        base = Path(settings.UPLOAD_DIR).resolve()
+        safe.relative_to(base)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    if not safe.exists() or not safe.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return Response(content=safe.read_bytes(), media_type="image/png")
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +108,11 @@ async def list_exams(session: AsyncSession = Depends(get_session)):
                 uploaded_by=exam.uploaded_by,
                 question_count=qcount,
                 enriched_count=ecount,
+                nome=exam.nome,
+                periodo=exam.periodo,
+                tipo=exam.tipo,
+                cor=exam.cor,
+                tipo_prova=exam.tipo_prova,
                 created_at=exam.created_at,
             )
         )
@@ -126,6 +161,7 @@ async def export_exams(
                             "gabarito": q.gabarito,
                             "confidence": q.confidence,
                             "enrichment": q.enrichment,
+                            "images": q.images or [],
                         }
                         for q in qs
                     ],
@@ -161,6 +197,7 @@ async def export_exams(
                 "keywords",
                 "difficulty",
                 "bloom_level",
+                "images",
             ]
         )
         for exam in exams:
@@ -192,6 +229,7 @@ async def export_exams(
                         ", ".join(enr.get("keywords", [])),
                         enr.get("difficulty", ""),
                         enr.get("bloom_level", ""),
+                        "|".join(q.images or []),
                     ]
                 )
         # utf-8-sig BOM so Excel auto-detects encoding
@@ -200,6 +238,62 @@ async def export_exams(
             media_type="text/csv",
             headers={"Content-Disposition": 'attachment; filename="exams_export.csv"'},
         )
+
+
+# ---------------------------------------------------------------------------
+# Update exam metadata
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/exams/{exam_id}", response_model=ExamResponse)
+async def update_exam(
+    exam_id: uuid.UUID,
+    body: ExamUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Update editable metadata fields on an exam (nome, periodo, tipo, cor, tipo_prova)."""
+    from sqlalchemy import update as sa_update  # noqa: PLC0415
+
+    result = await session.execute(select(Exam).where(Exam.id == exam_id))
+    exam = result.scalar_one_or_none()
+    if not exam:
+        raise HTTPException(status_code=404, detail=_EXAM_NOT_FOUND)
+
+    patch = body.model_dump(exclude_unset=True)
+    if patch:
+        await session.execute(sa_update(Exam).where(Exam.id == exam_id).values(**patch))
+        await session.commit()
+        result = await session.execute(select(Exam).where(Exam.id == exam_id))
+        exam = result.scalar_one()
+
+    q_count = (
+        await session.execute(
+            select(func.count(Question.id)).where(Question.exam_id == exam_id)
+        )
+    ).scalar_one()
+    enriched_count = (
+        await session.execute(
+            select(func.count(Question.id))
+            .where(Question.exam_id == exam_id)
+            .where(Question.enrichment.isnot(None))
+        )
+    ).scalar_one()
+
+    return ExamResponse(
+        id=exam.id,
+        filename=exam.filename,
+        file_hash=exam.file_hash,
+        edital_id=exam.edital_id,
+        uploaded_by=None,
+        question_count=q_count,
+        enriched_count=enriched_count,
+        nome=exam.nome,
+        periodo=exam.periodo,
+        tipo=exam.tipo,
+        cor=exam.cor,
+        tipo_prova=exam.tipo_prova,
+        created_at=exam.created_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +381,129 @@ async def trigger_explain(
     return ExplainResponse(
         message=f"Explanation enrichment queued ({body.mode}, {provider_label})", queued=count
     )
+
+
+# ---------------------------------------------------------------------------
+# Explanation refinement (specialist insight → regenerate)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/questions/{question_id}/explanation/refine",
+    response_model=ExplanationRefineResponse,
+    status_code=202,
+)
+async def refine_explanation(
+    question_id: uuid.UUID,
+    body: ExplanationRefineRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Save a specialist insight and queue a single-question explanation regeneration.
+
+    The insight is persisted on the question so it can be recalled and reused in
+    future runs (e.g. voice-dictated notes transcribed upstream and passed as text).
+    """
+    from sqlalchemy import update as sa_update  # noqa: PLC0415
+
+    result = await session.execute(select(Question).where(Question.id == question_id))
+    question = result.scalar_one_or_none()
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    if not question.gabarito:
+        raise HTTPException(
+            status_code=422, detail="Question has no gabarito — cannot generate explanation"
+        )
+
+    await session.execute(
+        sa_update(Question)
+        .where(Question.id == question_id)
+        .values(explanation_insight=body.insight.strip())
+    )
+    await session.commit()
+
+    provider_label = (body.provider or settings.ENRICHMENT_PROVIDER).lower()
+    pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
+    await pool.enqueue_job("refine_explanation", str(question_id), body.provider)
+    await pool.aclose()
+
+    return ExplanationRefineResponse(
+        message=f"Explanation refinement queued ({provider_label})",
+        question_id=question_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Single-question explain (no insight required)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/questions/{question_id}/explain",
+    response_model=ExplanationRefineResponse,
+    status_code=202,
+)
+async def explain_single_question(
+    question_id: uuid.UUID,
+    body: ExplainQuestionRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Queue explanation generation for a single question.
+
+    Requires the question to have a gabarito.  Reuses the same worker task as
+    explanation refinement but without requiring a specialist insight.
+    """
+    result = await session.execute(select(Question).where(Question.id == question_id))
+    question = result.scalar_one_or_none()
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    if not question.gabarito:
+        raise HTTPException(
+            status_code=422, detail="Question has no gabarito — cannot generate explanation"
+        )
+
+    provider_label = (body.provider or settings.ENRICHMENT_PROVIDER).lower()
+    pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
+    await pool.enqueue_job("refine_explanation", str(question_id), body.provider)
+    await pool.aclose()
+
+    return ExplanationRefineResponse(
+        message=f"Explanation queued ({provider_label})",
+        question_id=question_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Update gabarito for a single question
+# ---------------------------------------------------------------------------
+
+
+@router.patch(
+    "/questions/{question_id}/gabarito",
+    response_model=UpdateGabaritoResponse,
+)
+async def update_question_gabarito(
+    question_id: uuid.UUID,
+    body: UpdateGabaritoRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Set or clear the gabarito (correct answer) for a single question.
+
+    Pass ``null`` to clear an existing gabarito.  Accepts A-E only.
+    """
+    from sqlalchemy import update as sa_update  # noqa: PLC0415
+
+    result = await session.execute(select(Question).where(Question.id == question_id))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    await session.execute(
+        sa_update(Question)
+        .where(Question.id == question_id)
+        .values(gabarito=body.gabarito)
+    )
+    await session.commit()
+
+    return UpdateGabaritoResponse(question_id=question_id, gabarito=body.gabarito)
 
 
 # ---------------------------------------------------------------------------
@@ -392,13 +609,17 @@ async def delete_exam(
     if not exam:
         raise HTTPException(status_code=404, detail=_EXAM_NOT_FOUND)
 
-    # Remove uploaded file from disk (keyed by file_hash prefix, same as worker)
+    # Remove uploaded PDF and associated image directory from disk
     upload_dir = Path(settings.UPLOAD_DIR)
     if upload_dir.exists():
         for candidate in upload_dir.iterdir():
-            if candidate.name.startswith(exam.file_hash[:16]):
+            if not candidate.name.startswith(exam.file_hash[:16]):
+                continue
+            if candidate.is_dir():
+                import shutil  # noqa: PLC0415
+                shutil.rmtree(candidate, ignore_errors=True)
+            else:
                 candidate.unlink(missing_ok=True)
-                break
 
     await session.delete(exam)
     await session.commit()

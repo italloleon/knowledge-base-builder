@@ -59,7 +59,7 @@ _USER_TEMPLATE = """\
 (E) {alt_e}
 
 **GABARITO OFICIAL: {gabarito}**
-
+{insight_block}
 ---
 
 ## TAREFA
@@ -81,6 +81,20 @@ Verificação obrigatória antes de responder: confirme que o campo "correta" co
 a letra "{gabarito}". Se não contiver, corrija antes de retornar.\
 """
 
+_INSIGHT_BLOCK = """\
+
+---
+
+## NOTA DO ESPECIALISTA
+
+Um especialista revisou esta questão e forneceu o seguinte insight para melhorar a explicação:
+
+\"{insight}\"
+
+Incorpore este conhecimento ao redigir o gabarito comentado. Se o insight corrigir ou \
+complementar uma explicação anterior, use-o para produzir uma versão mais precisa e completa.
+"""
+
 _UNSPECIFIED = "Não especificado"
 
 
@@ -99,7 +113,12 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _build_user_prompt(question: ParsedQuestion, gabarito: str, enrichment: dict[str, Any] | None) -> str:
+def _build_user_prompt(
+    question: ParsedQuestion,
+    gabarito: str,
+    enrichment: dict[str, Any] | None,
+    insight: str | None = None,
+) -> str:
     """Render the user prompt template, falling back gracefully for missing enrichment fields."""
     meta = enrichment or {}
 
@@ -117,6 +136,8 @@ def _build_user_prompt(question: ParsedQuestion, gabarito: str, enrichment: dict
         keywords_csv = ", ".join(str(k) for k in raw_keywords)
     else:
         keywords_csv = ""
+
+    insight_block = _INSIGHT_BLOCK.format(insight=insight.strip()) if insight and insight.strip() else ""
 
     alts = question.alternatives
     return _USER_TEMPLATE.format(
@@ -136,6 +157,7 @@ def _build_user_prompt(question: ParsedQuestion, gabarito: str, enrichment: dict
         alt_d=alts.get("D", ""),
         alt_e=alts.get("E", ""),
         gabarito=gabarito.upper(),
+        insight_block=insight_block,
     )
 
 
@@ -198,6 +220,7 @@ async def generate_explanation(
     question: ParsedQuestion,
     gabarito: str,
     enrichment: dict[str, Any] | None = None,
+    insight: str | None = None,
 ) -> dict[str, Any] | None:
     """Generate a gabarito comentado for a single question using Ollama.
 
@@ -207,6 +230,8 @@ async def generate_explanation(
         enrichment: Optional classification enrichment dict produced by the
                     classification enricher (area, topic, bloom_level, etc.).
                     Falls back to "Não especificado" for any missing field.
+        insight:    Optional specialist insight to guide the LLM towards a
+                    better or corrected explanation.
 
     Returns:
         A plain dict matching the QuestionExplanation schema, or None on error.
@@ -216,7 +241,7 @@ async def generate_explanation(
         logger.warning("Q%d: no alternatives — skipping explanation", question.number)
         return None
 
-    user_prompt = _build_user_prompt(question, gabarito, enrichment)
+    user_prompt = _build_user_prompt(question, gabarito, enrichment, insight=insight)
 
     payload = {
         "model": settings.OLLAMA_MODEL,

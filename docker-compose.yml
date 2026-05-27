@@ -60,7 +60,7 @@ services:
     volumes:
       - uploads:/app/uploads
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health/live || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3

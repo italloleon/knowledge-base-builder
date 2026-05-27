@@ -11,6 +11,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
+from app.database import PG_SEARCH_PATH
 from app.models import DocumentCategory, Edital, Exam, Job, JobStatus, ParseError, Question
 
 logging.basicConfig(
@@ -26,7 +27,11 @@ logger = logging.getLogger(__name__)
 # Database setup for worker process
 # ---------------------------------------------------------------------------
 
-_engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
+_engine = create_async_engine(
+    settings.DATABASE_URL,
+    pool_pre_ping=True,
+    connect_args={"server_settings": {"search_path": PG_SEARCH_PATH}},
+)
 _AsyncSession = async_sessionmaker(
     bind=_engine,
     class_=AsyncSession,
@@ -187,15 +192,52 @@ async def process_document(ctx: dict, job_id: str) -> None:  # noqa: ARG001
 
         try:
             logger.info("Stage 1: extracting PDF %s", pdf_path)
-            from app.pipeline.extraction import extract_markdown  # noqa: PLC0415
+            from app.pipeline.extraction import extract  # noqa: PLC0415
 
             try:
-                markdown = extract_markdown(pdf_path)
+                extraction = extract(pdf_path)
+                markdown = extraction.markdown
             except Exception as exc:  # noqa: BLE001
                 await _set_job_status(
                     session, job, JobStatus.failed, f"PDF extraction failed: {exc}"
                 )
                 return
+
+            # Save extracted images to disk keyed by exam hash prefix
+            image_dir = Path(settings.UPLOAD_DIR) / f"{exam.file_hash[:16]}_images"
+            saved_images: dict[str, str] = {}
+            if extraction.images:
+                image_dir.mkdir(parents=True, exist_ok=True)
+                for ref, png_bytes in extraction.images.items():
+                    safe_name = f"img_{ref}.png"
+                    dest = image_dir / safe_name
+                    dest.write_bytes(png_bytes)
+                    saved_images[ref] = str(dest.relative_to(settings.UPLOAD_DIR))
+                logger.info("Stage 1: saved %d images for exam %s", len(saved_images), exam.id)
+
+            # Stage 1b: extract cover metadata (best-effort, never blocks the pipeline)
+            try:
+                from app.pipeline.enrichers.exam_cover_gemini import extract_cover_metadata  # noqa: PLC0415
+
+                cover_meta = await extract_cover_metadata(markdown)
+                if cover_meta:
+                    await session.execute(
+                        update(Exam)
+                        .where(Exam.id == exam.id)
+                        .values(
+                            nome=cover_meta.get("nome"),
+                            periodo=cover_meta.get("periodo"),
+                            tipo=cover_meta.get("tipo"),
+                            cor=cover_meta.get("cor"),
+                            tipo_prova=cover_meta.get("tipo_prova"),
+                        )
+                    )
+                    await session.commit()
+                    logger.info(
+                        "Stage 1b: cover metadata saved for exam %s", exam.id
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Stage 1b: cover metadata extraction failed (non-fatal): %s", exc)
 
             logger.info(
                 "Stage 2/3: parsing markdown (%d chars) category=%s", len(markdown), job.category
@@ -212,6 +254,7 @@ async def process_document(ctx: dict, job_id: str) -> None:  # noqa: ARG001
 
             question_records: list[Question] = []
             for pq in parse_result.questions:
+                resolved = [saved_images.get(ref, ref) for ref in (pq.images or [])]
                 question_records.append(
                     Question(
                         id=uuid.uuid4(),
@@ -226,6 +269,7 @@ async def process_document(ctx: dict, job_id: str) -> None:  # noqa: ARG001
                         gabarito=None,
                         raw_block=pq.raw_block,
                         confidence=pq.confidence,
+                        images=resolved or None,
                     )
                 )
 
@@ -286,8 +330,13 @@ async def enrich_exam(  # noqa: ARG001
     from app.pipeline.base import ParsedQuestion  # noqa: PLC0415
     from app.pipeline.enrichers import get_enricher  # noqa: PLC0415
     from app.pipeline.enrichers.taxonomy import build_taxonomy_context  # noqa: PLC0415
+    from app.settings_store import get_setting  # noqa: PLC0415
 
-    enrich_questions = get_enricher(resolved_provider)
+    async with _AsyncSession() as session:
+        api_key = await get_setting(session, f"{resolved_provider}_api_key")
+        model = await get_setting(session, f"{resolved_provider}_model")
+
+    enrich_questions = get_enricher(resolved_provider, api_key=api_key, model=model)
 
     async with _AsyncSession() as session:
         exam_result = await session.execute(select(Exam).where(Exam.id == uuid.UUID(exam_id)))
@@ -395,7 +444,7 @@ async def enrich_exam(  # noqa: ARG001
 
 
 async def enrich_edital(  # noqa: ARG001
-    ctx: dict, edital_id: str, source_file_hash: str | None = None
+    ctx: dict, edital_id: str, source_file_hash: str | None = None, provider_override: str | None = None
 ) -> None:
     """Enrich an existing Edital record using Gemini AI.
 
@@ -447,10 +496,28 @@ async def enrich_edital(  # noqa: ARG001
 
         logger.info("enrich_edital: extracted %d chars of markdown", len(markdown))
 
-        # --- Stage 2: Gemini enrichment ---
-        from app.pipeline.enrichers.edital_gemini import enrich_edital as _gemini_enrich  # noqa: PLC0415
+        # --- Stage 2: AI enrichment (provider from DB settings) ---
+        from app.pipeline.enrichers.edital_generic import enrich_edital as _enrich  # noqa: PLC0415
+        from app.providers.registry import build_provider  # noqa: PLC0415
+        from app.settings_store import get_setting  # noqa: PLC0415
 
-        data = await _gemini_enrich(markdown)
+        async with _AsyncSession() as _cfg:
+            _provider_name = provider_override or (await get_setting(_cfg, "enrichment_provider")) or "gemini"
+            _api_key = (await get_setting(_cfg, f"{_provider_name}_api_key")) or ""
+            _model = await get_setting(_cfg, f"{_provider_name}_model")
+
+        timeout = max(settings.GEMINI_TIMEOUT_SECONDS * 4, 120)
+        _provider = build_provider(
+            _provider_name,
+            api_key=_api_key,
+            model=_model,
+            timeout_seconds=timeout,
+        )
+        logger.info(
+            "enrich_edital: using provider=%s model=%s",
+            _provider.name, _provider.model,
+        )
+        data = await _enrich(markdown, provider=_provider)
 
         # --- Stage 3: Merge into DB record ---
         # Scalar fields: only fill in gaps (don't overwrite existing data)
@@ -528,11 +595,20 @@ async def enrich_explanation(  # noqa: ARG001
     )
 
     from app.pipeline.base import ParsedQuestion  # noqa: PLC0415
+    from app.settings_store import get_setting  # noqa: PLC0415
 
-    if resolved_provider == "gemini":
-        from app.pipeline.enrichers.explanation_gemini import generate_explanations  # noqa: PLC0415
-    else:
+    if resolved_provider == "ollama":
         from app.pipeline.enrichers.explanation_ollama import generate_explanations  # noqa: PLC0415
+        _explanation_provider = None
+    else:
+        async with _AsyncSession() as _key_session:
+            api_key = await get_setting(_key_session, f"{resolved_provider}_api_key")
+            model = await get_setting(_key_session, f"{resolved_provider}_model")
+        from app.pipeline.enrichers.explanation_generic import generate_explanations as _gen_exp  # noqa: PLC0415
+        from app.providers.registry import build_provider  # noqa: PLC0415
+        _explanation_provider = build_provider(resolved_provider, api_key=api_key or "", model=model)
+        from functools import partial  # noqa: PLC0415
+        generate_explanations = partial(_gen_exp, provider=_explanation_provider)
 
     async with _AsyncSession() as session:
         stmt = (
@@ -564,6 +640,7 @@ async def enrich_explanation(  # noqa: ARG001
                 gabarito=q.gabarito,
                 raw_block="",
                 confidence=q.confidence,
+                images=q.images or [],
             )
             for q in questions
         ]
@@ -603,12 +680,105 @@ async def enrich_explanation(  # noqa: ARG001
 
 
 # ---------------------------------------------------------------------------
+# Single-question explanation refinement task
+# ---------------------------------------------------------------------------
+
+
+async def refine_explanation(  # noqa: ARG001
+    ctx: dict, question_id: str, provider: str | None = None
+) -> None:
+    """Regenerate the explanation for a single question using its stored insight.
+
+    The specialist's insight is read from Question.explanation_insight and injected
+    into the enricher prompt. The resulting explanation overwrites the previous one.
+    """
+    resolved_provider = (provider or settings.ENRICHMENT_PROVIDER).lower()
+    logger.info(
+        "refine_explanation started: question_id=%s provider=%s", question_id, resolved_provider
+    )
+
+    from app.pipeline.base import ParsedQuestion  # noqa: PLC0415
+    from app.settings_store import get_setting  # noqa: PLC0415
+
+    if resolved_provider == "ollama":
+        from app.pipeline.enrichers.explanation_ollama import generate_explanation  # noqa: PLC0415
+        _refine_provider = None
+    else:
+        async with _AsyncSession() as _key_session:
+            api_key = await get_setting(_key_session, f"{resolved_provider}_api_key")
+            model = await get_setting(_key_session, f"{resolved_provider}_model")
+        from app.pipeline.enrichers.explanation_generic import generate_explanation as _gen_exp_one  # noqa: PLC0415
+        from app.providers.registry import build_provider  # noqa: PLC0415
+        from functools import partial  # noqa: PLC0415
+        _refine_provider = build_provider(resolved_provider, api_key=api_key or "", model=model)
+        generate_explanation = partial(_gen_exp_one, provider=_refine_provider)
+
+    async with _AsyncSession() as session:
+        result = await session.execute(
+            select(Question).where(Question.id == uuid.UUID(question_id))
+        )
+        question = result.scalar_one_or_none()
+        if question is None:
+            logger.warning("refine_explanation: question not found (%s)", question_id)
+            return
+
+        if not question.gabarito:
+            logger.warning("refine_explanation: question %s has no gabarito — skipping", question_id)
+            return
+
+        parsed = ParsedQuestion(
+            number=question.number,
+            section=question.section.value if hasattr(question.section, "value") else str(question.section),
+            question_type=question.question_type.value if hasattr(question.question_type, "value") else str(question.question_type),
+            enunciado=question.enunciado,
+            items=question.items,
+            alternatives=question.alternatives or {},
+            gabarito=question.gabarito,
+            raw_block="",
+            confidence=question.confidence,
+            images=question.images or [],
+        )
+
+        try:
+            explanation = await generate_explanation(
+                parsed,
+                question.gabarito,
+                enrichment=question.enrichment,
+                insight=question.explanation_insight,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("refine_explanation: generate_explanation raised: %s", exc)
+            return
+
+        if explanation is None:
+            logger.warning("refine_explanation: no explanation returned for question %s", question_id)
+            return
+
+        await session.execute(
+            update(Question)
+            .where(Question.id == question.id)
+            .values(
+                explanation=explanation,
+                explanation_flagged=explanation.get("flagged", False),
+            )
+        )
+        await session.commit()
+        logger.info(
+            "refine_explanation done: question_id=%s correta=%s confidence=%.2f flagged=%s",
+            question_id,
+            explanation.get("correta"),
+            explanation.get("confidence", 0.0),
+            explanation.get("flagged"),
+        )
+
+
+# ---------------------------------------------------------------------------
 # ARQ WorkerSettings
 # ---------------------------------------------------------------------------
 
 
 class WorkerSettings:
-    functions = [process_document, enrich_exam, enrich_edital, enrich_explanation]
+    functions = [process_document, enrich_exam, enrich_edital, enrich_explanation, refine_explanation]
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     max_jobs = 10
     job_timeout = 3600

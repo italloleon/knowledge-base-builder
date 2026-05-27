@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 # Import Base so models are registered
 from app.database import Base  # noqa: F401
 import app.models  # noqa: F401  — registers all ORM models
+import app.models_app  # noqa: F401  — public app schema (`app`)
+import app.models_study  # noqa: F401
 
 config = context.config
 

@@ -58,6 +58,7 @@ class ParsedQuestion:
     gabarito: str | None
     raw_block: str
     confidence: float
+    images: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -273,7 +273,14 @@ async def _call_gemini_json(
                 return None
             response.raise_for_status()
             resp_data = response.json()
-            raw_content = resp_data["candidates"][0]["content"]["parts"][0]["text"]
+            candidate = resp_data["candidates"][0]
+            finish_reason = candidate.get("finishReason", "")
+            if finish_reason not in ("STOP", ""):
+                logger.warning(
+                    "_call_gemini_json: unexpected finishReason=%r — response may be truncated",
+                    finish_reason,
+                )
+            raw_content = candidate["content"]["parts"][0]["text"]
     except httpx.TimeoutException:
         logger.warning("_call_gemini_json: request timed out after %ds", timeout_seconds)
         return None
@@ -287,7 +294,13 @@ async def _call_gemini_json(
     except (KeyError, IndexError) as exc:
         logger.warning("_call_gemini_json: bad response shape: %s", exc)
         return None
-    return _extract_json(raw_content)
+    result = _extract_json(raw_content)
+    if result is None:
+        logger.warning(
+            "_call_gemini_json: could not parse JSON — raw response (first 500 chars): %r",
+            raw_content[:500],
+        )
+    return result
 
 
 async def enrich_edital(markdown: str) -> EditalData:

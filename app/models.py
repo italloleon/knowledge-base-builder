@@ -20,6 +20,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
+# PostgreSQL schema for knowledge-builder (curadoria) tables — future `app` schema can coexist.
+CURADORIA_SCHEMA = "curadoria"
+
 
 class JobStatus(str, enum.Enum):
     pending = "pending"
@@ -59,6 +62,7 @@ class OpinionTarget(str, enum.Enum):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = {"schema": CURADORIA_SCHEMA}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -87,12 +91,15 @@ class User(Base):
 
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"
+    __table_args__ = {"schema": CURADORIA_SCHEMA}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.users.id", ondelete="CASCADE"),
+        nullable=False,
     )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -114,7 +121,7 @@ class Edital(Base):
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     uploaded_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
+        ForeignKey(f"{CURADORIA_SCHEMA}.users.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -144,7 +151,10 @@ class Edital(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    __table_args__ = (UniqueConstraint("file_hash", name="uq_editais_file_hash"),)
+    __table_args__ = (
+        UniqueConstraint("file_hash", name="uq_editais_file_hash"),
+        {"schema": CURADORIA_SCHEMA},
+    )
 
     uploaded_by: Mapped["User | None"] = relationship(
         "User", back_populates="uploaded_editais", foreign_keys=[uploaded_by_id]
@@ -167,19 +177,27 @@ class Exam(Base):
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     edital_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("editais.id", ondelete="SET NULL"),
+        ForeignKey(f"{CURADORIA_SCHEMA}.editais.id", ondelete="SET NULL"),
         nullable=True,
     )
     uploaded_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
+        ForeignKey(f"{CURADORIA_SCHEMA}.users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    nome: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    periodo: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    tipo: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cor: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tipo_prova: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    __table_args__ = (UniqueConstraint("file_hash", name="uq_exams_file_hash"),)
+    __table_args__ = (
+        UniqueConstraint("file_hash", name="uq_exams_file_hash"),
+        {"schema": CURADORIA_SCHEMA},
+    )
 
     uploaded_by: Mapped["User | None"] = relationship(
         "User", back_populates="uploaded_exams", foreign_keys=[uploaded_by_id]
@@ -196,15 +214,20 @@ class Exam(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
+    __table_args__ = {"schema": CURADORIA_SCHEMA}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     exam_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("exams.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.exams.id", ondelete="SET NULL"),
+        nullable=True,
     )
     edital_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("editais.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.editais.id", ondelete="SET NULL"),
+        nullable=True,
     )
     category: Mapped[DocumentCategory] = mapped_column(
         Enum(DocumentCategory, name="document_category_enum"),
@@ -238,15 +261,20 @@ class Job(Base):
 
 class Question(Base):
     __tablename__ = "questions"
+    __table_args__ = {"schema": CURADORIA_SCHEMA}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     exam_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("exams.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.exams.id", ondelete="CASCADE"),
+        nullable=False,
     )
     job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.jobs.id", ondelete="CASCADE"),
+        nullable=False,
     )
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     section: Mapped[SectionType] = mapped_column(
@@ -262,12 +290,14 @@ class Question(Base):
     enunciado: Mapped[str] = mapped_column(Text, nullable=False)
     items: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     alternatives: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    images: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     gabarito: Mapped[str | None] = mapped_column(String(1), nullable=True)
     raw_block: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     enrichment: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     explanation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     explanation_flagged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    explanation_insight: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -281,15 +311,20 @@ class Question(Base):
 
 class ParseError(Base):
     __tablename__ = "parse_errors"
+    __table_args__ = {"schema": CURADORIA_SCHEMA}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     exam_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("exams.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.exams.id", ondelete="CASCADE"),
+        nullable=False,
     )
     job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.jobs.id", ondelete="CASCADE"),
+        nullable=False,
     )
     raw_block: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
@@ -301,6 +336,23 @@ class ParseError(Base):
     job: Mapped["Job"] = relationship("Job", back_populates="parse_error_records")
 
 
+class SystemSetting(Base):
+    """Key-value store for runtime-configurable settings (API keys, provider selection, etc.)."""
+
+    __tablename__ = "system_settings"
+    __table_args__ = {"schema": CURADORIA_SCHEMA}
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class QuestionOpinion(Base):
     __tablename__ = "question_opinions"
 
@@ -308,10 +360,14 @@ class QuestionOpinion(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     question_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("questions.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.questions.id", ondelete="CASCADE"),
+        nullable=False,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey(f"{CURADORIA_SCHEMA}.users.id", ondelete="CASCADE"),
+        nullable=False,
     )
     target: Mapped[OpinionTarget] = mapped_column(
         Enum(OpinionTarget, name="opinion_target_enum"),
@@ -335,6 +391,7 @@ class QuestionOpinion(Base):
 
     __table_args__ = (
         CheckConstraint("char_length(body) <= 5000", name="ck_opinion_body_length"),
+        {"schema": CURADORIA_SCHEMA},
     )
 
     question: Mapped["Question"] = relationship("Question", back_populates="opinions")

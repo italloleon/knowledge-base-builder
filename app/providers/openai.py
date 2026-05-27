@@ -1,0 +1,123 @@
+"""OpenAI provider (GPT-4o, GPT-4-turbo, etc.)."""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import re
+from typing import Any
+
+import httpx
+
+from app.providers.base import AIProvider
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAIProvider(AIProvider):
+    name = "openai"
+    label = "OpenAI"
+    default_model = "gpt-4o-mini"
+
+    _BASE_URL = "https://api.openai.com/v1/chat/completions"
+
+    async def generate_json(
+        self,
+        system_prompt: str,
+        user_text: str,
+        response_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_text},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+        return await self._post(payload)
+
+    async def generate_json_with_images(
+        self,
+        system_prompt: str,
+        user_text: str,
+        images: list[bytes],
+        response_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        image_content = [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{base64.standard_b64encode(img).decode()}",
+                    "detail": "high",
+                },
+            }
+            for img in images
+        ]
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [*image_content, {"type": "text", "text": user_text}]},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+        return await self._post(payload)
+
+    async def generate_json_with_pdf(
+        self,
+        system_prompt: str,
+        user_text: str,
+        pdf_bytes: bytes,
+        response_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        logger.warning("[%s] PDF-based generation is not supported — falling back to text", self.name)
+        return None
+
+    async def _post(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    self._BASE_URL,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=self.timeout_seconds,
+                )
+                if response.status_code == 429:
+                    self._log_rate_limit()
+                    return None
+                response.raise_for_status()
+                data = response.json()
+                raw = data["choices"][0]["message"]["content"]
+        except httpx.TimeoutException:
+            self._log_timeout()
+            return None
+        except httpx.HTTPStatusError as exc:
+            self._log_http_error(exc.response.status_code, exc.response.text or "")
+            return None
+        except (KeyError, IndexError) as exc:
+            logger.warning("[%s] unexpected response shape: %s", self.name, exc)
+            return None
+
+        return self._extract_json(raw)
+
+    @staticmethod
+    def _extract_json(text: str) -> dict[str, Any] | None:
+        text = text.strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except json.JSONDecodeError:
+                pass
+        return None

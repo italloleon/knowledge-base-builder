@@ -19,7 +19,7 @@ from app.pipeline.base import (
 # ---------------------------------------------------------------------------
 
 _QUESTION_NUMBER_PATTERNS = [
-    re.compile(r"^\*{0,2}(0?\d{1,2}|100)\*{0,2}\s*$"),
+    re.compile(r"^\*{0,2}([1-9]\d?|100)\*{0,2}\s*$"),
     re.compile(r"^(?:\*\*)?QUEST[ÃA]O\s+(?:\*\*\s*)?(0?\d{1,2}|100)", re.IGNORECASE | re.UNICODE),
     re.compile(r"^#{1,3}\s+(0?\d{1,2}|100)\s*$"),
 ]
@@ -28,10 +28,19 @@ _QUESTION_NUMBER_PATTERNS = [
 # Preprocessing patterns
 # ---------------------------------------------------------------------------
 
-_SECTION_GERAIS = re.compile(r"conhecimentos?\s+gerais", re.IGNORECASE | re.UNICODE)
-_SECTION_ESPECIFICOS = re.compile(
-    r"conhecimentos?\s+espec[ií]ficos?", re.IGNORECASE | re.UNICODE
+_SECTION_GERAIS = re.compile(
+    r"conhecimentos?\s+gerais"
+    r"|compe?t[êe]ncias?\s*\(\s*conhecimentos?[^)]*\)\s*comuns?",
+    re.IGNORECASE | re.UNICODE,
 )
+_SECTION_ESPECIFICOS = re.compile(
+    r"conhecimentos?\s+espec[ií]ficos?"
+    r"|compe?t[êe]ncias?\s*\(\s*conhecimentos?[^)]*\)\s*espec[ií]fic",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Matches "## 2 Some text here" — Docling sometimes puts question text inline with heading
+_INLINE_Q_HEADER = re.compile(r"^(#{1,3}\s+(\d{1,3}))\s+(\S.*)")
 
 _NOISE_PATTERNS = [
     re.compile(r"^\s*ENARE\b.*$", re.IGNORECASE),
@@ -40,7 +49,8 @@ _NOISE_PATTERNS = [
     re.compile(r"^\s*P[áa]gina\s+\d+.*$", re.IGNORECASE),
     re.compile(r"^\s*[-–]\s*\d{1,3}\s*[-–]\s*$"),
     re.compile(r"^\s*ENFER(MAGEM)?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*PROVA\s+[A-Z]\s*$", re.IGNORECASE),
+    re.compile(r"^\s*PROVA\s*$", re.IGNORECASE),
+    re.compile(r"^\s*PROVA\s+[A-Z0-9]\s*$", re.IGNORECASE),
     re.compile(r"^\s*CADERNO\s+DE\s+PROVA\s*$", re.IGNORECASE),
     re.compile(r"^\s*GABARITO\s*$", re.IGNORECASE),
     re.compile(r"^\s*Residência\s+em\s+Enfermagem\s*$", re.IGNORECASE),
@@ -50,12 +60,16 @@ _NOISE_PATTERNS = [
 # Parsing patterns
 # ---------------------------------------------------------------------------
 
+_IMAGE_REF_RE = re.compile(r"<!-- image:(\d+) -->")
+
 _ALT_PAREN_BOTH = re.compile(r"^\s*(?:-\s*)?\(([A-E])\)\s+(.+)", re.DOTALL)
 _ALT_PAREN_RIGHT = re.compile(r"^\s*([A-E])\)\s+(.+)", re.DOTALL)
 _ALT_DOT = re.compile(r"^\s*([A-E])\.\s+(.+)", re.DOTALL)
+# AOCP format: Docling renders alternatives as a numbered list — "5. (A) text"
+_ALT_NUMBERED_PAREN = re.compile(r"^\s*\d+\.\s*\(([A-E])\)\s+(.+)", re.DOTALL)
 
 _ROMAN_ITEM = re.compile(
-    r"^\s*(I{1,3}|IV|IX|VI{0,3}|X)\s*[-–.]\s+(.+)",
+    r"^\s*(?:-\s*)?(I{1,3}|IV|IX|VI{0,3}|X)\s*[-–.]\s+(.+)",
     re.IGNORECASE,
 )
 _TRUE_FALSE_ITEM = re.compile(r"^\s*\(\s*[VFvf]?\s*\)\s+(.+)")
@@ -70,7 +84,19 @@ class ENAREParser(DocumentParser):
     # ------------------------------------------------------------------
 
     def preprocess(self, markdown: str) -> PreprocessResult:
-        lines = markdown.splitlines()
+        # Normalize "## 2 Question text..." → "## 2\nQuestion text..."
+        # so the number is always on its own line for boundary detection.
+        normalized: list[str] = []
+        for line in markdown.splitlines():
+            m = _INLINE_Q_HEADER.match(line)
+            if m:
+                num = int(m.group(2))
+                if 1 <= num <= 200:
+                    normalized.append(m.group(1))   # "## 2"
+                    normalized.append(m.group(3))   # "Question text..."
+                    continue
+            normalized.append(line)
+        lines = normalized
         repeating = self._detect_repeating_lines(lines)
 
         clean_lines: list[str] = []
@@ -100,7 +126,7 @@ class ENAREParser(DocumentParser):
             section_map=section_map,
         )
 
-    def _detect_repeating_lines(self, lines: list[str], min_repeats: int = 3) -> set[str]:
+    def _detect_repeating_lines(self, lines: list[str], min_repeats: int = 5) -> set[str]:
         stripped = [l.strip() for l in lines if l.strip()]
         counter = Counter(stripped)
         return {line for line, count in counter.items() if count >= min_repeats}
@@ -109,8 +135,12 @@ class ENAREParser(DocumentParser):
         stripped = line.strip()
         if not stripped:
             return False
-        # Never remove lines that are alternatives — they repeat across questions by design
-        for pattern in [_ALT_PAREN_BOTH, _ALT_PAREN_RIGHT, _ALT_DOT]:
+        # Never remove question-number boundaries — they repeat in multi-prova PDFs
+        # by design (the same number appears once per exam version).
+        if self._question_number(stripped) is not None:
+            return False
+        # Never remove alternatives — they repeat across questions by design
+        for pattern in [_ALT_PAREN_BOTH, _ALT_NUMBERED_PAREN, _ALT_PAREN_RIGHT, _ALT_DOT]:
             if pattern.match(stripped):
                 return False
         if stripped in repeating:
@@ -183,7 +213,21 @@ class ENAREParser(DocumentParser):
         if current_number is not None and current_lines:
             blocks.append((current_number, "\n".join(current_lines).strip()))
 
-        return blocks
+        # Multi-prova PDFs (e.g. "divulgar" files with PROVA 01-04) repeat the
+        # same question numbers 4×.  Keep the occurrence with the most
+        # alternative lines so we get the richest content rather than the first
+        # occurrence which may be an empty block at a page boundary.
+        best: dict[int, tuple[str, int]] = {}  # num → (block, alt_count)
+        for num, block in blocks:
+            alt_count = sum(
+                1 for l in block.splitlines()
+                if any(p.match(l) for p in [_ALT_PAREN_BOTH, _ALT_NUMBERED_PAREN,
+                                             _ALT_PAREN_RIGHT, _ALT_DOT])
+            )
+            if num not in best or alt_count > best[num][1]:
+                best[num] = (block, alt_count)
+
+        return [(num, block) for num, (block, _) in sorted(best.items())]
 
     def _extract_alternatives(self, lines: list[str]) -> tuple[dict[str, str], str, bool]:
         alt: dict[str, str] = {}
@@ -192,6 +236,7 @@ class ENAREParser(DocumentParser):
         for line in lines:
             for pattern, name in [
                 (_ALT_PAREN_BOTH, "paren_both"),
+                (_ALT_NUMBERED_PAREN, "numbered_paren"),
                 (_ALT_PAREN_RIGHT, "paren_right"),
                 (_ALT_DOT, "dot"),
             ]:
@@ -278,14 +323,14 @@ class ENAREParser(DocumentParser):
             if self._question_number(line) is not None:
                 continue
             is_alt = False
-            for pattern in [_ALT_PAREN_BOTH, _ALT_PAREN_RIGHT, _ALT_DOT]:
+            for pattern in [_ALT_PAREN_BOTH, _ALT_NUMBERED_PAREN, _ALT_PAREN_RIGHT, _ALT_DOT]:
                 m = pattern.match(line)
                 if m and m.group(1).upper() in "ABCDE":
                     is_alt = True
                     break
             if not is_alt:
-                stem_lines.append(line)
-        return "\n".join(stem_lines).strip()
+                stem_lines.append(_IMAGE_REF_RE.sub("", line).strip())
+        return "\n".join(l for l in stem_lines if l).strip()
 
     def _inject_vignettes(self, questions: list[ParsedQuestion]) -> list[ParsedQuestion]:
         result = list(questions)
@@ -344,14 +389,16 @@ class ENAREParser(DocumentParser):
             enunciado=enunciado,
         )
 
-        if not alternatives and not enunciado.strip():
+        if not alternatives:
             result.errors.append(
                 ParseFailure(
                     raw_block=raw_block,
-                    reason=f"Question {number}: no alternatives and no enunciado found",
+                    reason=f"Question {number}: no alternatives found (likely cover page or noise block)",
                 )
             )
             return
+
+        images = [m.group(1) for m in _IMAGE_REF_RE.finditer(raw_block)]
 
         result.questions.append(
             ParsedQuestion(
@@ -364,5 +411,6 @@ class ENAREParser(DocumentParser):
                 gabarito=None,
                 raw_block=raw_block,
                 confidence=confidence,
+                images=images,
             )
         )

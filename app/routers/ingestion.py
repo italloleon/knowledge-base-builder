@@ -151,15 +151,15 @@ async def ingest_upload(
 
     user_id = current_user.id if current_user else None
 
-    async with session.begin():
-        if category == DocumentCategory.edital:
-            edital = await _get_or_create_edital(session, original_name, file_hash, uploaded_by_id=user_id)
-            job = await _create_job(session, category, edital_id=edital.id)
-            exam_id_out, edital_id_out = None, edital.id
-        else:
-            exam = await _get_or_create_exam(session, original_name, file_hash, uploaded_by_id=user_id)
-            job = await _create_job(session, category, exam_id=exam.id)
-            exam_id_out, edital_id_out = exam.id, None
+    if category == DocumentCategory.edital:
+        edital = await _get_or_create_edital(session, original_name, file_hash, uploaded_by_id=user_id)
+        job = await _create_job(session, category, edital_id=edital.id)
+        exam_id_out, edital_id_out = None, edital.id
+    else:
+        exam = await _get_or_create_exam(session, original_name, file_hash, uploaded_by_id=user_id)
+        job = await _create_job(session, category, exam_id=exam.id)
+        exam_id_out, edital_id_out = exam.id, None
+    await session.commit()
 
     await _save_upload(content, safe_name)
     await _enqueue_job(str(job.id))
@@ -214,15 +214,15 @@ async def ingest_url(
 
     user_id = current_user.id if current_user else None
 
-    async with session.begin():
-        if body.category == DocumentCategory.edital:
-            edital = await _get_or_create_edital(session, original_name, file_hash, uploaded_by_id=user_id)
-            job = await _create_job(session, body.category, edital_id=edital.id)
-            exam_id_out, edital_id_out = None, edital.id
-        else:
-            exam = await _get_or_create_exam(session, original_name, file_hash, uploaded_by_id=user_id)
-            job = await _create_job(session, body.category, exam_id=exam.id)
-            exam_id_out, edital_id_out = exam.id, None
+    if body.category == DocumentCategory.edital:
+        edital = await _get_or_create_edital(session, original_name, file_hash, uploaded_by_id=user_id)
+        job = await _create_job(session, body.category, edital_id=edital.id)
+        exam_id_out, edital_id_out = None, edital.id
+    else:
+        exam = await _get_or_create_exam(session, original_name, file_hash, uploaded_by_id=user_id)
+        job = await _create_job(session, body.category, exam_id=exam.id)
+        exam_id_out, edital_id_out = exam.id, None
+    await session.commit()
 
     await _save_upload(content, safe_name)
     await _enqueue_job(str(job.id))

@@ -6,7 +6,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import auth, editais, exams, gabarito, health, imports, ingestion, jobs, opinions, users
+from app.routers import auth, editais, exams, gabarito, health, imports, ingestion, jobs, opinions, study, users
+from app.routers import settings as settings_router
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -44,6 +45,8 @@ def create_app() -> FastAPI:
     application.include_router(editais.router, prefix="/api")
     application.include_router(gabarito.router, prefix="/api")
     application.include_router(opinions.router, prefix="/api")
+    application.include_router(study.router, prefix="/api")
+    application.include_router(settings_router.router, prefix="/api")
 
     return application
 

@@ -7,7 +7,8 @@ from pathlib import Path
 import aiofiles
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from typing import Annotated
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -76,12 +77,14 @@ async def delete_edital(edital_id: uuid.UUID, session: AsyncSession = Depends(ge
 
 @router.post("/editais/{edital_id}/enrich", response_model=EditalEnrichResponse, status_code=202)
 async def enrich_edital_endpoint(
-    edital_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    edital_id: uuid.UUID,
+    provider: Annotated[str | None, Query()] = None,
+    session: AsyncSession = Depends(get_session),
 ):
     """Queue an AI enrichment job for an existing Edital.
 
-    Uses Gemini to extract metadata fields and knowledge areas (Anexo III)
-    from the original PDF.  Returns 404 if the Edital does not exist.
+    Pass ``provider`` to override the default from system settings.
+    Returns 404 if the Edital does not exist.
     """
     edital = (
         await session.execute(select(Edital).where(Edital.id == edital_id))
@@ -91,7 +94,7 @@ async def enrich_edital_endpoint(
 
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     pool = await create_pool(redis_settings)
-    job = await pool.enqueue_job("enrich_edital", str(edital_id))
+    job = await pool.enqueue_job("enrich_edital", str(edital_id), None, provider)
     await pool.aclose()
 
     job_id = job.job_id if job is not None else "unknown"
@@ -102,6 +105,7 @@ async def enrich_edital_endpoint(
 async def enrich_edital_from_upload(
     edital_id: uuid.UUID,
     file: UploadFile = File(...),
+    provider: Annotated[str | None, Query()] = None,
     session: AsyncSession = Depends(get_session),
 ):
     """Upload an annex PDF and queue enrichment for the target edital."""
@@ -132,7 +136,7 @@ async def enrich_edital_from_upload(
 
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     pool = await create_pool(redis_settings)
-    job = await pool.enqueue_job("enrich_edital", str(edital_id), file_hash)
+    job = await pool.enqueue_job("enrich_edital", str(edital_id), file_hash, provider)
     await pool.aclose()
 
     job_id = job.job_id if job is not None else "unknown"
@@ -190,6 +194,11 @@ async def list_edital_exams(
             uploaded_by=exam.uploaded_by,
             question_count=qcount,
             enriched_count=ecount,
+            nome=exam.nome,
+            periodo=exam.periodo,
+            tipo=exam.tipo,
+            cor=exam.cor,
+            tipo_prova=exam.tipo_prova,
             created_at=exam.created_at,
         )
         for exam, qcount, ecount in rows
@@ -203,21 +212,21 @@ async def link_exam_to_edital(
     session: AsyncSession = Depends(get_session),
 ):
     """Link a prova (Exam) to its Edital."""
-    async with session.begin():
-        exam = (
-            await session.execute(select(Exam).where(Exam.id == exam_id))
-        ).scalar_one_or_none()
-        if not exam:
-            raise HTTPException(status_code=404, detail=_EXAM_NOT_FOUND)
+    exam = (
+        await session.execute(select(Exam).where(Exam.id == exam_id))
+    ).scalar_one_or_none()
+    if not exam:
+        raise HTTPException(status_code=404, detail=_EXAM_NOT_FOUND)
 
-        edital = (
-            await session.execute(select(Edital).where(Edital.id == body.edital_id))
-        ).scalar_one_or_none()
-        if not edital:
-            raise HTTPException(status_code=404, detail=_EDITAL_NOT_FOUND)
+    edital = (
+        await session.execute(select(Edital).where(Edital.id == body.edital_id))
+    ).scalar_one_or_none()
+    if not edital:
+        raise HTTPException(status_code=404, detail=_EDITAL_NOT_FOUND)
 
-        exam.edital_id = edital.id
-        session.add(exam)
+    exam.edital_id = edital.id
+    session.add(exam)
+    await session.commit()
 
     from sqlalchemy import func
     from app.models import Question
@@ -250,5 +259,10 @@ async def link_exam_to_edital(
         uploaded_by=exam.uploaded_by,
         question_count=q_count,
         enriched_count=enriched_count,
+        nome=exam.nome,
+        periodo=exam.periodo,
+        tipo=exam.tipo,
+        cor=exam.cor,
+        tipo_prova=exam.tipo_prova,
         created_at=exam.created_at,
     )

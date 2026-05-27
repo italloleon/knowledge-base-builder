@@ -43,3 +43,12 @@ async def require_user(
     if user is None and settings.AUTH_ENABLED:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     return user
+
+
+async def require_account(
+    user: Annotated[User | None, Depends(get_current_user)],
+) -> User:
+    """Always requires a logged-in user (study notes, timers, etc.)."""
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    return user
